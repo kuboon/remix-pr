@@ -22,6 +22,8 @@ describe('db command', () => {
     assert.match(result.stdout, /--migrations <path>/)
     assert.match(result.stdout, /--seed <path>/)
     assert.match(result.stdout, /--to <migration>/)
+    assert.match(result.stdout, /--step <n>/)
+    assert.match(result.stdout, /--dry-run/)
   })
 
   it('refuses destructive database commands without --force', async () => {
@@ -234,6 +236,107 @@ describe('db command', () => {
     }
   })
 
+  it('rolls back one migration at a time and back through a target', async () => {
+    let projectDir = await createDatabaseProject()
+
+    try {
+      let migrate = await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+      assert.equal(migrate.exitCode, 0, migrate.stderr)
+      assert.ok(readTableNames(projectDir).includes('second_table'))
+
+      let rollback = await captureOutput(() => runRemix(['db', 'rollback'], { cwd: projectDir }))
+      assert.equal(rollback.exitCode, 0, rollback.stderr)
+      assert.equal(rollback.stdout, 'reverted 20260715130000_create_second\n')
+      assert.equal(readTableNames(projectDir).includes('second_table'), false)
+      assert.ok(readTableNames(projectDir).includes('first_table'))
+
+      let toFirst = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--to', '20260715120000'], { cwd: projectDir }),
+      )
+      assert.equal(toFirst.exitCode, 0, toFirst.stderr)
+      assert.match(toFirst.stdout, /reverted 20260715120000_create_first/)
+      assert.equal(readTableNames(projectDir).includes('first_table'), false)
+
+      let empty = await captureOutput(() => runRemix(['db', 'rollback'], { cwd: projectDir }))
+      assert.equal(empty.exitCode, 0, empty.stderr)
+      assert.equal(empty.stdout, 'no migrations to revert\n')
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reverts several migrations with --step', async () => {
+    let projectDir = await createDatabaseProject()
+
+    try {
+      await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+
+      let result = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '2'], { cwd: projectDir }),
+      )
+      assert.equal(result.exitCode, 0, result.stderr)
+      assert.match(result.stdout, /reverted 20260715130000_create_second/)
+      assert.match(result.stdout, /reverted 20260715120000_create_first/)
+
+      let tables = readTableNames(projectDir)
+      assert.equal(tables.includes('first_table'), false)
+      assert.equal(tables.includes('second_table'), false)
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves the database alone for dry runs', async () => {
+    let projectDir = await createDatabaseProject()
+
+    try {
+      let migrate = await captureOutput(() =>
+        runRemix(['db', 'migrate', '--dry-run'], { cwd: projectDir }),
+      )
+      assert.equal(migrate.exitCode, 0, migrate.stderr)
+      assert.match(migrate.stdout, /would apply 20260715120000_create_first/)
+      assert.equal(readTableNames(projectDir).includes('first_table'), false)
+
+      await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+
+      let rollback = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--dry-run'], { cwd: projectDir }),
+      )
+      assert.equal(rollback.exitCode, 0, rollback.stderr)
+      assert.equal(rollback.stdout, 'would revert 20260715130000_create_second\n')
+      assert.ok(readTableNames(projectDir).includes('second_table'))
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects rollback options that cannot be combined or counted', async () => {
+    let projectDir = await createDatabaseProject()
+
+    try {
+      let combined = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '1', '--to', '20260715120000'], { cwd: projectDir }),
+      )
+      assert.equal(combined.exitCode, 1)
+      assert.match(combined.stderr, /RMX_INVALID_FLAG_COMBINATION/)
+      assert.match(combined.stderr, /Cannot combine --step and --to/)
+
+      let step = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '0'], { cwd: projectDir }),
+      )
+      assert.equal(step.exitCode, 1)
+      assert.match(step.stderr, /Invalid --step value "0"\. Expected a positive integer/)
+
+      let migrateStep = await captureOutput(() =>
+        runRemix(['db', 'migrate', '--step', '1'], { cwd: projectDir }),
+      )
+      assert.equal(migrateStep.exitCode, 1)
+      assert.match(migrateStep.stderr, /Unknown argument: --step/)
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
   it('reports unknown subcommands and invalid command options', async () => {
     let unknown = await captureOutput(() => runRemix(['db', 'wat']))
     let invalid = await captureOutput(() => runRemix(['db', 'migrate', '--seed', './seed.sql']))
@@ -290,6 +393,11 @@ async function createDatabaseProject(
   await fs.writeFile(
     path.join(projectDir, 'db/migrations/20260715130000_create_second/up.sql'),
     'create table second_table (id integer primary key);\n',
+    'utf8',
+  )
+  await fs.writeFile(
+    path.join(projectDir, 'db/migrations/20260715130000_create_second/down.sql'),
+    'drop table second_table;\n',
     'utf8',
   )
 

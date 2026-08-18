@@ -119,6 +119,87 @@ describe('runRemixDb', () => {
     assert.deepEqual(lines, ['no pending migrations'])
   })
 
+  it('reverts one migration by default and prints reverted migrations', async () => {
+    let db = new RecordingDatabase()
+    db.migrateResult = {
+      applied: [],
+      reverted: [{ id: '20260715123000', name: 'create_users', status: 'pending' }],
+      sql: [],
+    }
+
+    let { value: exitCode, lines } = await captureLog(() =>
+      runRemixDb({
+        command: 'rollback',
+        db,
+        migrations,
+        journalTable: 'app_migrations',
+      }),
+    )
+
+    assert.equal(exitCode, 0)
+    assert.deepEqual(db.calls, ['migrate'])
+    assert.equal(db.migrateOptions?.direction, 'down')
+    assert.equal(db.migrateOptions?.step, 1)
+    assert.equal(db.migrateOptions?.to, undefined)
+    assert.equal(db.migrateOptions?.journalTable, 'app_migrations')
+    assert.deepEqual(lines, ['reverted 20260715123000_create_users'])
+  })
+
+  it('reverts back through a migration target', async () => {
+    let db = new RecordingDatabase()
+
+    let { lines } = await captureLog(() =>
+      runRemixDb({
+        command: 'rollback',
+        db,
+        migrations,
+        to: '20260715123000_create_users',
+      }),
+    )
+
+    assert.equal(db.migrateOptions?.to, '20260715123000_create_users')
+    assert.equal(db.migrateOptions?.step, undefined)
+    assert.deepEqual(lines, ['no migrations to revert'])
+  })
+
+  it('rejects a rollback that combines to and step', async () => {
+    let db = new RecordingDatabase()
+
+    await assert.rejects(
+      () =>
+        runRemixDb({
+          command: 'rollback',
+          db,
+          migrations,
+          to: '20260715123000',
+          step: 2,
+        }),
+      /Cannot combine "to" and "step" migration options in the same run/,
+    )
+    assert.deepEqual(db.calls, [])
+  })
+
+  it('reports dry runs without claiming the migrations ran', async () => {
+    let db = new RecordingDatabase()
+    db.migrateResult = {
+      applied: [{ id: '20260715123000', name: 'create_users', status: 'applied' }],
+      reverted: [{ id: '20260715123000', name: 'create_users', status: 'pending' }],
+      sql: [],
+    }
+
+    let migrate = await captureLog(() =>
+      runRemixDb({ command: 'migrate', db, migrations, dryRun: true }),
+    )
+    assert.equal(db.migrateOptions?.dryRun, true)
+    assert.deepEqual(migrate.lines, ['would apply 20260715123000_create_users'])
+
+    let rollback = await captureLog(() =>
+      runRemixDb({ command: 'rollback', db, migrations, dryRun: true }),
+    )
+    assert.equal(db.migrateOptions?.dryRun, true)
+    assert.deepEqual(rollback.lines, ['would revert 20260715123000_create_users'])
+  })
+
   it('wipes the database', async () => {
     let db = new RecordingDatabase()
     let exitCode = await runRemixDb({ command: 'wipe', db })

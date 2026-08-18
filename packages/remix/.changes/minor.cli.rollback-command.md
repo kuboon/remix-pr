@@ -1,0 +1,1 @@
+Added `remix db rollback` for reverting applied migrations, bounded by `--step <n>` (default `1`) or `--to <migration>`, and `--dry-run` for both `remix db migrate` and `remix db rollback`. The same commands are available programmatically through `runRemixDb()` from `remix/data-table/cli`.

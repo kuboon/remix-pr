@@ -160,8 +160,11 @@ disable configured strict mode for one run.
 `remix db` requires `db.adapter`. Adapters use `type: "sqlite"`, `type: "postgres"`, or
 `type: "mysql"`; PostgreSQL uses `connectionString` and MySQL uses `uri`. A connection value may be
 a string or an object naming an environment variable with an optional default. `db.seed` names a
-SQL file that `remix db seed` and `remix db reset` run against the database. Database flags such as
-`--migrations`, `--seed`, `--journal-table`, and `--connection-env` override the corresponding
+SQL file that `remix db seed` and `remix db reset` run against the database. `remix db rollback`
+reverts applied migrations newest first, `--step <n>` at a time (default `1`) or back through the
+migration named by `--to`, which it reverts as well. `remix db migrate` and `remix db rollback`
+accept `--dry-run` to report what they would run without touching the database. Database flags such
+as `--migrations`, `--seed`, `--journal-table`, and `--connection-env` override the corresponding
 config for one invocation. When no global `--config` is provided, database commands find the
 nearest `remix.json` by walking up from the working directory.
 

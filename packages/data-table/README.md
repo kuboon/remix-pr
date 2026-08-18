@@ -433,12 +433,18 @@ Run lifecycle commands through the Remix CLI:
 remix db status
 remix db migrate
 remix db migrate --to 20260301113000_add_user_status
+remix db migrate --dry-run
+remix db rollback
+remix db rollback --step 2
+remix db rollback --to 20260301113000_add_user_status
 remix db seed
 remix db reset
 remix db wipe
 ```
 
 `--to` accepts a bare migration id (`20260301113000`) or the full directory name (`20260301113000_add_user_status`).
+
+`remix db rollback` runs `down.sql` for applied migrations, newest first. It reverts `--step <n>` migrations (default `1`), or every migration back through `--to`, including the named one. `--step` and `--to` cannot be combined. `migrate` and `rollback` both accept `--dry-run`, which reports the migrations that would run and leaves the database and journal untouched.
 
 `remix db status` reports applied migrations whose files are no longer present as `missing`. If the journal table does not exist, it reports every migration as pending without creating the table. Forward migration runs stop before executing SQL when an applied journal entry is missing from the current migration set. Rollbacks skip those orphaned journal entries so migrations that are still present can be reverted.
 

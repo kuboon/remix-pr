@@ -110,6 +110,7 @@ describe('completion command', () => {
         'mode:values',
         'migrate',
         'reset',
+        'rollback',
         'seed',
         'status',
         'wipe',
@@ -162,6 +163,7 @@ describe('completion command', () => {
       migrate.stdout,
       [
         'mode:values',
+        '--dry-run',
         '--connection-env',
         '--journal-table',
         '--migrations',

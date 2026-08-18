@@ -1,5 +1,5 @@
 import type { Database } from './lib/database.ts'
-import type { Migrations, Seed } from './lib/migrations.ts'
+import type { DatabaseMigrateOptions, Migrations, Seed } from './lib/migrations.ts'
 
 interface DatabaseCommandOptions {
   /** Database instance used by the command. */
@@ -18,6 +18,26 @@ export type RunRemixDbOptions =
        * the full `id_name` directory form.
        */
       to?: string
+      /** Reports the migrations a run would apply without applying them. */
+      dryRun?: boolean
+      /** Migration journal table. */
+      journalTable?: string
+    })
+  | (DatabaseCommandOptions & {
+      /** Reverts applied migrations, newest first. */
+      command: 'rollback'
+      /** Migrations to revert. */
+      migrations: Migrations
+      /**
+       * Reverts back through this migration, including it. Accepts a bare
+       * migration id or the full `id_name` directory form. Cannot be combined
+       * with `step`.
+       */
+      to?: string
+      /** Number of migrations to revert. Defaults to 1. */
+      step?: number
+      /** Reports the migrations a run would revert without reverting them. */
+      dryRun?: boolean
       /** Migration journal table. */
       journalTable?: string
     })
@@ -59,10 +79,10 @@ export type RunRemixDbOptions =
  */
 export async function runRemixDb(options: RunRemixDbOptions): Promise<number> {
   if (options.command === 'migrate') {
-    let migrateOptions =
+    let migrateOptions: DatabaseMigrateOptions =
       options.to === undefined
-        ? { journalTable: options.journalTable }
-        : { to: options.to, journalTable: options.journalTable }
+        ? { dryRun: options.dryRun, journalTable: options.journalTable }
+        : { to: options.to, dryRun: options.dryRun, journalTable: options.journalTable }
     let result = await options.db.migrate(options.migrations, migrateOptions)
 
     if (result.applied.length === 0) {
@@ -70,7 +90,39 @@ export async function runRemixDb(options: RunRemixDbOptions): Promise<number> {
     }
 
     for (let entry of result.applied) {
-      console.log('applied ' + entry.id + '_' + entry.name)
+      console.log((options.dryRun ? 'would apply ' : 'applied ') + entry.id + '_' + entry.name)
+    }
+
+    return 0
+  }
+
+  if (options.command === 'rollback') {
+    if (options.to !== undefined && options.step !== undefined) {
+      throw new Error('Cannot combine "to" and "step" migration options in the same run')
+    }
+
+    let migrateOptions: DatabaseMigrateOptions =
+      options.to === undefined
+        ? {
+            step: options.step ?? 1,
+            direction: 'down',
+            dryRun: options.dryRun,
+            journalTable: options.journalTable,
+          }
+        : {
+            to: options.to,
+            direction: 'down',
+            dryRun: options.dryRun,
+            journalTable: options.journalTable,
+          }
+    let result = await options.db.migrate(options.migrations, migrateOptions)
+
+    if (result.reverted.length === 0) {
+      console.log('no migrations to revert')
+    }
+
+    for (let entry of result.reverted) {
+      console.log((options.dryRun ? 'would revert ' : 'reverted ') + entry.id + '_' + entry.name)
     }
 
     return 0
