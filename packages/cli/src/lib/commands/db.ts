@@ -8,6 +8,7 @@ import { loadMigrations, loadSeed } from '@remix-run/data-table/migrations/node'
 
 import { findAppRoot } from '../app-root.ts'
 import type { CliContext } from '../cli-context.ts'
+import { createModuleDatabase } from '../db-module.ts'
 import {
   isDatabaseCommand,
   type DatabaseCommandInvocation,
@@ -300,6 +301,9 @@ function overrideConnection(
   if (adapter.type === 'postgres') {
     return { ...adapter, connectionString: { env: environmentName } }
   }
+  if (adapter.type === 'module') {
+    return { ...adapter, connection: { env: environmentName } }
+  }
   return { ...adapter, uri: { env: environmentName } }
 }
 
@@ -416,6 +420,14 @@ async function createConfiguredDatabase(
       foreignKeys: adapter.foreignKeys,
       busyTimeout: adapter.busyTimeout,
     })
+  }
+
+  if (adapter.type === 'module') {
+    return createModuleDatabase(
+      adapter,
+      configDir,
+      adapter.connection === undefined ? undefined : resolveDbString(adapter.connection),
+    )
   }
 
   if (adapter.type === 'postgres') {
