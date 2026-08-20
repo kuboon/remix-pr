@@ -8,6 +8,7 @@ import { loadMigrations, loadSeed } from '@remix-run/data-table/migrations/node'
 
 import { findAppRoot } from '../app-root.ts'
 import type { CliContext } from '../cli-context.ts'
+import { createModuleDatabase } from '../db-module.ts'
 import {
   isDatabaseCommand,
   type DatabaseCommandInvocation,
@@ -63,6 +64,8 @@ export function getDbCommandHelpText(target: NodeJS.WriteStream = process.stdout
         'remix db wipe --force',
         'remix db migrate',
         'remix db migrate --to 20260715123000_add_users',
+        'remix db rollback',
+        'remix db rollback --step 2 --dry-run',
         'remix db status',
         'remix db seed',
         'remix db reset --force',
@@ -72,24 +75,35 @@ export function getDbCommandHelpText(target: NodeJS.WriteStream = process.stdout
           description: 'Read the database connection from an environment variable',
           label: '--connection-env <name>',
         },
+        {
+          description: 'Report what would be reverted without running it (rollback only)',
+          label: '--dry-run',
+        },
         { description: 'Confirm a destructive command (wipe and reset only)', label: '--force' },
         {
-          description: 'Use a migration journal table (migrate, status, and reset only)',
+          description: 'Use a migration journal table (migrate, rollback, status, and reset only)',
           label: '--journal-table <name>',
         },
         {
-          description: 'Load migrations from a directory (migrate, status, and reset only)',
+          description:
+            'Load migrations from a directory (migrate, rollback, status, and reset only)',
           label: '--migrations <path>',
         },
         { description: 'Run a SQL seed file (seed and reset only)', label: '--seed <path>' },
         {
-          description: 'Stop after applying the specified migration (migrate only)',
+          description: 'Revert this many migrations, newest first (rollback only)',
+          label: '--step <count>',
+        },
+        {
+          description:
+            'Stop after applying the specified migration, or revert back through it (migrate and rollback only)',
           label: '--to <migration>',
         },
       ],
       usage: [
         'remix db wipe --force [options]',
         'remix db migrate [--to <migration>] [options]',
+        'remix db rollback [--step <count> | --to <migration>] [--dry-run] [options]',
         'remix db status [options]',
         'remix db seed [options]',
         'remix db reset --force [options]',
@@ -118,6 +132,28 @@ function parseDbCommandArgs(argv: string[]): DatabaseCommandInvocation {
       { maxPositionals: 0 },
     )
     return { command, ...parsed.options }
+  }
+
+  if (command === 'rollback') {
+    let parsed = parseArgs(
+      commandArgv,
+      {
+        connectionEnv: connectionOption,
+        dryRun: { flag: '--dry-run', type: 'boolean' },
+        journalTable: journalOption,
+        migrations: migrationsOption,
+        step: { flag: '--step', type: 'string' },
+        to: { flag: '--to', type: 'string' },
+      },
+      { maxPositionals: 0 },
+    )
+
+    if (parsed.options.step !== undefined && parsed.options.to !== undefined) {
+      throw invalidOptionValue('Options --step and --to are mutually exclusive')
+    }
+
+    let { step: rawStep, ...options } = parsed.options
+    return { command, ...options, step: parseStepOption(rawStep) }
   }
 
   if (command === 'reset') {
@@ -171,6 +207,17 @@ function parseDbCommandArgs(argv: string[]): DatabaseCommandInvocation {
   return { command, ...parsed.options }
 }
 
+function parseStepOption(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+
+  let step = Number(value)
+  if (!Number.isInteger(step) || step < 1) {
+    throw invalidOptionValue(`Option --step expects a positive integer, received "${value}"`)
+  }
+
+  return step
+}
+
 async function resolveDbConfig(
   context: CliContext,
 ): Promise<{ config: RemixDbCommandConfig; configDir: string }> {
@@ -206,6 +253,7 @@ function resolveDatabaseCommandPlan(
   if (
     (invocation.command === 'migrate' ||
       invocation.command === 'reset' ||
+      invocation.command === 'rollback' ||
       invocation.command === 'status') &&
     migrations === undefined
   ) {
@@ -221,9 +269,11 @@ function resolveDatabaseCommandPlan(
   return {
     adapter,
     command: invocation.command,
+    dryRun: invocation.dryRun,
     journalTable,
     migrations,
     seed,
+    step: invocation.step,
     to: invocation.to,
   }
 }
@@ -250,6 +300,9 @@ function overrideConnection(
   }
   if (adapter.type === 'postgres') {
     return { ...adapter, connectionString: { env: environmentName } }
+  }
+  if (adapter.type === 'module') {
+    return { ...adapter, connection: { env: environmentName } }
   }
   return { ...adapter, uri: { env: environmentName } }
 }
@@ -305,6 +358,28 @@ async function executeDatabaseCommand(plan: DatabaseCommandPlan, db: Database): 
     })
   }
 
+  if (plan.command === 'rollback') {
+    if (plan.to !== undefined) {
+      return runRemixDb({
+        command: plan.command,
+        db,
+        migrations,
+        to: plan.to,
+        dryRun: plan.dryRun,
+        journalTable: plan.journalTable,
+      })
+    }
+
+    return runRemixDb({
+      command: plan.command,
+      db,
+      migrations,
+      step: plan.step,
+      dryRun: plan.dryRun,
+      journalTable: plan.journalTable,
+    })
+  }
+
   if (plan.command === 'reset') {
     let seed = plan.seed === undefined ? undefined : await loadSeed(plan.seed)
     return runRemixDb({
@@ -345,6 +420,14 @@ async function createConfiguredDatabase(
       foreignKeys: adapter.foreignKeys,
       busyTimeout: adapter.busyTimeout,
     })
+  }
+
+  if (adapter.type === 'module') {
+    return createModuleDatabase(
+      adapter,
+      configDir,
+      adapter.connection === undefined ? undefined : resolveDbString(adapter.connection),
+    )
   }
 
   if (adapter.type === 'postgres') {

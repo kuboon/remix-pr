@@ -11,7 +11,7 @@ Typed relational query toolkit for JavaScript runtimes.
 - **Relation-First Queries**: `hasMany`, `hasOne`, `belongsTo`, `hasManyThrough`, and nested eager loading
 - **Safe Scoped Writes**: `update`/`delete` with `orderBy`/`limit` run safely in a transaction
 - **First-Class Migrations**: Plain SQL `up.sql`/`down.sql` files with a journaling runner and dry-run planning
-- **Database Lifecycle Commands**: Wipe, migrate, inspect, seed, and reset through `remix db`
+- **Database Lifecycle Commands**: Wipe, migrate, rollback, inspect, seed, and reset through `remix db`
 - **Raw SQL Escape Hatch**: Execute SQL directly with `db.exec(sql\`...\`)`
 
 `data-table` gives you two complementary APIs:
@@ -427,18 +427,50 @@ environment variable at command runtime, and paths are resolved relative to `rem
 Application runtime setup remains application-owned. It does not need to expose any special
 exports for the CLI.
 
+To run `remix db` against a database this package does not ship an adapter for, point `db.adapter`
+at a module that creates it:
+
+```jsonc
+{
+  "db": {
+    "adapter": {
+      "type": "module",
+      "module": "./app/database.ts",
+      "export": "createDatabase",
+      "connection": { "env": "DATABASE_URL" },
+    },
+    "migrations": { "directory": "./db/migrations" },
+  },
+}
+```
+
+```ts
+import type { RemixDbModuleFactory } from 'remix/cli'
+
+export const createDatabase: RemixDbModuleFactory = ({ connection }) =>
+  createMyDatabase({ url: connection })
+```
+
+The factory receives `{ configDir, connection, options }`, where `connection` comes from
+`db.adapter.connection` or `--connection-env` and `options` is passed through from
+`db.adapter.options`. The CLI closes the returned database when the command finishes.
+
 Run lifecycle commands through the Remix CLI:
 
 ```sh
 remix db status
 remix db migrate
 remix db migrate --to 20260301113000_add_user_status
+remix db rollback
+remix db rollback --step 2
+remix db rollback --to 20260301113000_add_user_status
+remix db rollback --dry-run
 remix db seed
-remix db reset
-remix db wipe
+remix db reset --force
+remix db wipe --force
 ```
 
-`--to` accepts a bare migration id (`20260301113000`) or the full directory name (`20260301113000_add_user_status`).
+`rollback` reverts the most recently applied migration by default. Bound it with either `--step <count>` or `--to <migration>`, which reverts through the target migration inclusively. Migration targets accept a bare migration id (`20260301113000`) or the full directory name (`20260301113000_add_user_status`). Use `--dry-run` to report what would be reverted without changing the database.
 
 `remix db status` reports applied migrations whose files are no longer present as `missing`. If the journal table does not exist, it reports every migration as pending without creating the table. Forward migration runs stop before executing SQL when an applied journal entry is missing from the current migration set. Rollbacks skip those orphaned journal entries so migrations that are still present can be reverted.
 
@@ -472,6 +504,15 @@ for (let script of plan.sql) console.log(script)
 ```
 
 `to` and `step` are mutually exclusive. Omit `journalTable` to use `data_table_migrations`.
+
+Hosts that embed the database CLI can invoke the same rollback behavior through `runRemixDb()`:
+
+```ts
+import { runRemixDb } from 'remix/data-table/cli'
+
+await runRemixDb({ command: 'rollback', db, migrations })
+await runRemixDb({ command: 'rollback', db, migrations, step: 2, dryRun: true })
+```
 
 Database drivers with migration locking run the complete migration and journal lifecycle through the
 connection that owns the lock. This keeps advisory locks correctly paired when the driver uses a

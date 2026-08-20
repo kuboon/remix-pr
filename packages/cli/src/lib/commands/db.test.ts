@@ -21,7 +21,10 @@ describe('db command', () => {
     assert.match(result.stdout, /--journal-table <name>/)
     assert.match(result.stdout, /--migrations <path>/)
     assert.match(result.stdout, /--seed <path>/)
+    assert.match(result.stdout, /--step <count>/)
     assert.match(result.stdout, /--to <migration>/)
+    assert.match(result.stdout, /--dry-run/)
+    assert.match(result.stdout, /remix db rollback/)
   })
 
   it('refuses destructive database commands without --force', async () => {
@@ -234,6 +237,186 @@ describe('db command', () => {
     }
   })
 
+  it('rolls back the most recent migration, newest first', async () => {
+    let projectDir = await createDatabaseProject({ reversible: true })
+
+    try {
+      await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+
+      let rollback = await captureOutput(() => runRemix(['db', 'rollback'], { cwd: projectDir }))
+      assert.equal(rollback.exitCode, 0, rollback.stderr)
+      assert.match(rollback.stdout, /reverted 20260715130000_create_second/)
+      assert.equal(readTableNames(projectDir).includes('second_table'), false)
+      assert.ok(readTableNames(projectDir).includes('first_table'))
+
+      let status = await captureOutput(() => runRemix(['db', 'status'], { cwd: projectDir }))
+      assert.match(status.stdout, /20260715120000 create_first applied/)
+      assert.match(status.stdout, /20260715130000 create_second pending/)
+
+      let remaining = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '1'], { cwd: projectDir }),
+      )
+      assert.equal(remaining.exitCode, 0, remaining.stderr)
+      assert.match(remaining.stdout, /reverted 20260715120000_create_first/)
+
+      let empty = await captureOutput(() => runRemix(['db', 'rollback'], { cwd: projectDir }))
+      assert.equal(empty.exitCode, 0, empty.stderr)
+      assert.match(empty.stdout, /no migrations to revert/)
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('creates a database from a module adapter', async () => {
+    let projectDir = await createModuleDatabaseProject()
+
+    try {
+      let migrate = await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+      assert.equal(migrate.exitCode, 0, migrate.stderr)
+      assert.match(migrate.stdout, /applied 20260715120000_create_first/)
+      assert.ok(readTableNames(projectDir).includes('first_table'))
+
+      let context = await readModuleContext(projectDir)
+      assert.equal(context.configDir, projectDir)
+      assert.equal(context.connection, './database.sqlite')
+      assert.deepEqual(context.options, { label: 'from-config' })
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('bounds a rollback with --step, --to, and --dry-run', async () => {
+    let projectDir = await createDatabaseProject({ reversible: true })
+
+    try {
+      await captureOutput(() => runRemix(['db', 'migrate'], { cwd: projectDir }))
+
+      let dryRun = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--dry-run'], { cwd: projectDir }),
+      )
+      assert.equal(dryRun.exitCode, 0, dryRun.stderr)
+      assert.match(dryRun.stdout, /would revert 20260715130000_create_second/)
+      // A dry run reports without reverting, so the table is still there.
+      assert.ok(readTableNames(projectDir).includes('second_table'))
+
+      // --to is inclusive: it reverts back through the named migration.
+      let toFirst = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--to', '20260715120000'], { cwd: projectDir }),
+      )
+      assert.equal(toFirst.exitCode, 0, toFirst.stderr)
+      assert.match(toFirst.stdout, /reverted 20260715130000_create_second/)
+      assert.match(toFirst.stdout, /reverted 20260715120000_create_first/)
+      assert.equal(readTableNames(projectDir).includes('first_table'), false)
+
+      let both = await captureOutput(() =>
+        runRemix(['db', 'migrate'], { cwd: projectDir }).then(() =>
+          runRemix(['db', 'rollback', '--step', '2'], { cwd: projectDir }),
+        ),
+      )
+      assert.equal(both.exitCode, 0, both.stderr)
+      assert.match(both.stdout, /reverted 20260715130000_create_second/)
+      assert.match(both.stdout, /reverted 20260715120000_create_first/)
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('calls the default export of a module adapter and overrides its connection', async () => {
+    let projectDir = await createModuleDatabaseProject({
+      adapter: { type: 'module', module: './app/database.ts' },
+    })
+    let previous = process.env.REMIX_TEST_DATABASE
+    process.env.REMIX_TEST_DATABASE = './override.sqlite'
+
+    try {
+      let result = await captureOutput(() =>
+        runRemix(['db', 'migrate', '--connection-env', 'REMIX_TEST_DATABASE'], { cwd: projectDir }),
+      )
+      assert.equal(result.exitCode, 0, result.stderr)
+
+      let context = await readModuleContext(projectDir)
+      assert.equal(context.connection, './override.sqlite')
+      assert.equal(context.options, undefined)
+
+      let sqlite = new DatabaseSync(path.join(projectDir, 'override.sqlite'))
+      let table = sqlite
+        .prepare("select name from sqlite_master where type = 'table' and name = 'first_table'")
+        .get()
+      sqlite.close()
+      assert.ok(table)
+    } finally {
+      if (previous === undefined) delete process.env.REMIX_TEST_DATABASE
+      else process.env.REMIX_TEST_DATABASE = previous
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects invalid rollback bounds and irreversible migrations', async () => {
+    let projectDir = await createDatabaseProject({ reversible: true })
+
+    try {
+      let both = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '1', '--to', '20260715120000'], { cwd: projectDir }),
+      )
+      assert.equal(both.exitCode, 1)
+      assert.match(both.stderr, /Options --step and --to are mutually exclusive/)
+
+      let zero = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', '0'], { cwd: projectDir }),
+      )
+      assert.equal(zero.exitCode, 1)
+      assert.match(zero.stderr, /--step expects a positive integer/)
+
+      let notANumber = await captureOutput(() =>
+        runRemix(['db', 'rollback', '--step', 'two'], { cwd: projectDir }),
+      )
+      assert.equal(notANumber.exitCode, 1)
+      assert.match(notANumber.stderr, /--step expects a positive integer/)
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+
+    // Without a down script the whole rollback fails before touching the database.
+    let irreversibleDir = await createDatabaseProject()
+
+    try {
+      await captureOutput(() => runRemix(['db', 'migrate'], { cwd: irreversibleDir }))
+
+      let irreversible = await captureOutput(() =>
+        runRemix(['db', 'rollback'], { cwd: irreversibleDir }),
+      )
+      assert.equal(irreversible.exitCode, 1)
+      assert.match(irreversible.stderr, /has no down script/)
+      assert.ok(readTableNames(irreversibleDir).includes('second_table'))
+    } finally {
+      await fs.rm(irreversibleDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports module adapters that cannot be imported or do not export a factory', async () => {
+    let missingModule = await createModuleDatabaseProject({
+      adapter: { type: 'module', module: './app/missing.ts' },
+    })
+    let missingExport = await createModuleDatabaseProject({
+      adapter: { type: 'module', module: './app/database.ts', export: 'createTursoDatabase' },
+    })
+
+    try {
+      let notFound = await captureOutput(() => runRemix(['db', 'status'], { cwd: missingModule }))
+      assert.equal(notFound.exitCode, 1)
+      assert.match(notFound.stderr, /RMX_DB_MODULE_NOT_FOUND/)
+      assert.match(notFound.stderr, /\.\/app\/missing\.ts/)
+
+      let noFactory = await captureOutput(() => runRemix(['db', 'status'], { cwd: missingExport }))
+      assert.equal(noFactory.exitCode, 1)
+      assert.match(noFactory.stderr, /RMX_DB_MODULE_FACTORY_REQUIRED/)
+      assert.match(noFactory.stderr, /"createTursoDatabase"/)
+    } finally {
+      await fs.rm(missingModule, { recursive: true, force: true })
+      await fs.rm(missingExport, { recursive: true, force: true })
+    }
+  })
+
   it('reports unknown subcommands and invalid command options', async () => {
     let unknown = await captureOutput(() => runRemix(['db', 'wat']))
     let invalid = await captureOutput(() => runRemix(['db', 'migrate', '--seed', './seed.sql']))
@@ -262,10 +445,74 @@ function countSeededRows(projectDir: string): number {
   return Number(row?.count)
 }
 
+async function readModuleContext(projectDir: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await fs.readFile(path.join(projectDir, 'module-context.json'), 'utf8'))
+}
+
+async function createModuleDatabaseProject(
+  options: { adapter?: Record<string, unknown> } = {},
+): Promise<string> {
+  let projectDir = await createDatabaseProject()
+  let sqliteModule = import.meta.resolve('@remix-run/data-table-sqlite')
+
+  await fs.writeFile(
+    path.join(projectDir, 'app/database.ts'),
+    [
+      "import { writeFileSync } from 'node:fs'",
+      "import * as path from 'node:path'",
+      '',
+      `import { createSqliteDatabase } from '${sqliteModule}'`,
+      '',
+      'export function createDatabase(context) {',
+      '  writeFileSync(',
+      "    path.join(context.configDir, 'module-context.json'),",
+      '    JSON.stringify({',
+      '      configDir: context.configDir,',
+      '      connection: context.connection,',
+      '      options: context.options,',
+      '    }),',
+      "    'utf8',",
+      '  )',
+      '  return createSqliteDatabase({',
+      "    filename: path.resolve(context.configDir, context.connection ?? './database.sqlite'),",
+      '  })',
+      '}',
+      '',
+      'export default createDatabase',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+
+  await fs.writeFile(
+    path.join(projectDir, 'remix.json'),
+    JSON.stringify(
+      {
+        db: {
+          adapter: options.adapter ?? {
+            type: 'module',
+            module: './app/database.ts',
+            export: 'createDatabase',
+            connection: './database.sqlite',
+            options: { label: 'from-config' },
+          },
+          migrations: { directory: './db/migrations' },
+          seed: './db/seed.sql',
+        },
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  )
+  return projectDir
+}
+
 async function createDatabaseProject(
   options: {
     migrationsDirectory?: string
     missingSeed?: boolean
+    reversible?: boolean
   } = {},
 ): Promise<string> {
   let projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-cli-db-command-'))
@@ -292,6 +539,15 @@ async function createDatabaseProject(
     'create table second_table (id integer primary key);\n',
     'utf8',
   )
+
+  // The second migration is irreversible by default, so `rollback` tests opt in to a down script.
+  if (options.reversible) {
+    await fs.writeFile(
+      path.join(projectDir, 'db/migrations/20260715130000_create_second/down.sql'),
+      'drop table second_table;\n',
+      'utf8',
+    )
+  }
 
   if (!options.missingSeed) {
     await fs.writeFile(
