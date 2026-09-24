@@ -118,12 +118,27 @@ browser-safe values it needs to handle its part of the page.
 The document shell loads `app/actions/public/entry.ts`. That module calls `run()` once:
 
 ```ts filename=app/actions/public/entry.ts
+import {
+  detectMultipleImportMapSupport,
+  importModule,
+  preloadShim,
+} from "remix/multiple-import-maps-polyfill";
 import { run } from "remix/ui";
 
 let app = run({
   async loadModule(moduleUrl, exportName) {
-    let module = await import(moduleUrl);
-    return module[exportName];
+    let module = await importModule(moduleUrl);
+    let Component = module[exportName];
+    if (typeof Component !== "function") {
+      throw new Error(`Unknown component: ${moduleUrl}#${exportName}`);
+    }
+    return Component;
+  },
+  async processClientEntryPreloads(preloads) {
+    if (await detectMultipleImportMapSupport()) return preloads;
+
+    preloadShim(preloads);
+    return [];
   },
 });
 
@@ -134,7 +149,9 @@ app.addEventListener("error", (event) => {
 await app.ready();
 ```
 
-`loadModule` imports the named component for every client entry discovered in the document.
+`loadModule` imports the named component for every client entry discovered in the document. Browsers
+with multiple import map support use native imports and preloads. Browsers without that support use
+the polyfill when later frame responses introduce new mappings.
 
 The returned app runtime has three lifecycle methods:
 
@@ -210,6 +227,12 @@ props.
 
 Calling `handle.update()` schedules work and returns a promise. Await it when the next step needs the
 updated DOM:
+
+Call it from an event handler, queued task, subscription, timer, or other work that runs after the
+component commits. Calling it during setup warns and skips the extra render because the initial
+render follows setup. Calling it during rendering, or before the initial commit from outside setup,
+throws an error. If rendering discovers work that should run after the commit, schedule that work
+with `handle.queueTask()`.
 
 ```tsx
 import { on, ref } from "remix/ui";
@@ -450,12 +473,12 @@ The ref callback runs when the element is inserted, not on every component updat
 conditional, its ref signal has the right lifetime for work that should stop when just that element
 disappears.
 
-For `window`, `document`, media queries, and other `EventTarget` values, use
-`addEventListeners(target, signal, listeners)`. Schedule browser-only setup after the client commit
-and tie it to `handle.signal`, which aborts when the component disconnects:
+For event targets outside the rendered tree, such as `window`, `document`, or a media query, use
+native `addEventListener()`. Schedule browser-only setup after the client commit, and pass
+`handle.signal` so the listener is removed when the component disconnects:
 
 ```tsx
-import { addEventListeners, clientEntry } from "remix/ui";
+import { clientEntry } from "remix/ui";
 import type { Handle } from "remix/ui";
 
 export const ViewportWidth = clientEntry(import.meta.url, function ViewportWidth(handle: Handle) {
@@ -463,12 +486,14 @@ export const ViewportWidth = clientEntry(import.meta.url, function ViewportWidth
 
   handle.queueTask(() => {
     width = window.innerWidth;
-    addEventListeners(window, handle.signal, {
-      resize() {
+    window.addEventListener(
+      "resize",
+      () => {
         width = window.innerWidth;
         handle.update();
       },
-    });
+      { signal: handle.signal },
+    );
     handle.update();
   });
 
@@ -480,7 +505,7 @@ Scheduling the setup avoids reading `window` during server rendering. For a clie
 already runs only in the browser, so it can register the listener directly.
 
 Some listeners need a shorter lifetime than the component. Create an `AbortController` when that
-work starts, use its signal with `addEventListeners(...)`, and abort it when the work finishes. Also
+work starts, pass its signal to `addEventListener(...)`, and abort it when the work finishes. Also
 abort it from `handle.signal` so navigation cannot leave temporary listeners behind.
 
 ## Async work and cancellation {#optimistic-updates-and-cancellation-with-handle-signal}
@@ -599,7 +624,7 @@ The component creates the model from serializable props, listens for changes, an
 open state for its details panel:
 
 ```tsx filename=app/ui/public/cart.tsx
-import { addEventListeners, clientEntry, on } from "remix/ui";
+import { clientEntry, on } from "remix/ui";
 import type { Handle } from "remix/ui";
 
 import { CartModel, type CartItem } from "./cart-model.ts";
@@ -613,11 +638,7 @@ export const Cart = clientEntry(import.meta.url, function Cart(handle: Handle<Ca
   let cart = new CartModel(handle.props.initialItems);
   let detailsOpen = false;
 
-  addEventListeners(cart, handle.signal, {
-    change() {
-      handle.update();
-    },
-  });
+  cart.addEventListener("change", () => handle.update(), { signal: handle.signal });
 
   return () => (
     <section>
@@ -640,7 +661,7 @@ export const Cart = clientEntry(import.meta.url, function Cart(handle: Handle<Ca
 });
 ```
 
-`addEventListeners()` connects model changes to `handle.update()`, and `handle.signal` removes the
+`cart.addEventListener()` connects model changes to `handle.update()`, and `handle.signal` removes the
 subscription when the component disconnects. If several components use the same model, create it at
 their nearest shared client boundary and provide it through component context. Do not pass a class
 instance through `clientEntry(...)` props because those props are serialized.
@@ -699,11 +720,21 @@ a link is an intentional part of the UI.
 Native anchors and forms can also control frame-aware navigation with attributes that correspond to
 the `link(...)` and `navigate(...)` options:
 
-- `rmx-target` names the frame to reload.
-- `rmx-src` provides the URL to fetch for that frame while `href` remains the browser's destination.
-- `rmx-history="push|replace"` controls how the navigation updates history, including overriding a form's default.
-- `rmx-reset-scroll="false"` preserves the current scroll position.
-- `rmx-document` opts out of interception and lets the browser perform a full-document navigation.
+- `data-rmx-target` names the frame to reload.
+- `data-rmx-src` provides the URL to fetch for the mounted named frame selected by `data-rmx-target` while `href` remains the browser's destination.
+- `data-rmx-history="push|replace"` controls how the navigation updates history, including overriding a form's default.
+- `data-rmx-reset-scroll="false"` preserves the current scroll position.
+- `data-rmx-document` opts out of interception and lets the browser perform a full-document navigation.
+
+The top frame follows the browser URL. If `data-rmx-target` is omitted, an intercepted navigation
+reloads the top frame from the link or form destination. If a specified target does not match a
+mounted frame, the browser performs a document navigation. Native form navigation preserves its
+method, body, files, and submitter overrides. Back and forward traversal reloads the destination
+document instead of reconciling stale frame content.
+
+A supplied `data-rmx-src` must be a valid same-origin URL regardless of the target. Invalid or
+cross-origin values disable interception and leave the navigation to the browser. These rules also
+apply to the `src` and `target` options of `link(...)` and `navigate(...)`.
 
 [Streaming UI with Frames](/streaming-ui-with-frames/) shows these attributes with named frames and
 explains when a form can submit directly through the frame resolver.

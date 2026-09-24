@@ -1,5 +1,10 @@
 import type { Handle, RemixNode, ResolveFrameOptions } from 'remix/ui'
 import { createRoot, css, on, run } from 'remix/ui'
+import {
+  detectMultipleImportMapSupport,
+  importModule,
+  preloadShim,
+} from 'remix/multiple-import-maps-polyfill'
 
 import { animateEntrance, spring } from 'remix/ui/animation'
 
@@ -7,12 +12,18 @@ import { routes } from '../../routes.ts'
 
 const app = run({
   async loadModule(moduleUrl, exportName) {
-    let mod = await import(moduleUrl)
-    let exp = (mod as any)[exportName]
+    let mod = await importModule(moduleUrl)
+    let exp = mod[exportName]
     if (typeof exp !== 'function') {
       throw new Error(`Export "${exportName}" from "${moduleUrl}" is not a function`)
     }
     return exp
+  },
+  async processClientEntryPreloads(preloads) {
+    if (await detectMultipleImportMapSupport()) return preloads
+
+    preloadShim(preloads)
+    return []
   },
   async resolveFrame(src, options) {
     return resolveFrameResponse(new URL(src, window.location.href), options)
@@ -55,7 +66,7 @@ async function resolveFrameResponse(url: URL, options?: ResolveFrameOptions) {
         title="Reload required"
         message="An unexpected error occurred. Please reload the page to try again."
         action={
-          <a rmx-document href={window.location.href} mix={actionLinkCss}>
+          <a data-rmx-document href={window.location.href} mix={actionLinkCss}>
             Reload
           </a>
         }

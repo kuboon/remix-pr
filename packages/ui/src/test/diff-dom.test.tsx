@@ -13,7 +13,7 @@ function attachClientEntryOwner(
   onDispose = () => {},
   identity: ClientEntryIdentity = { moduleUrl: '/entry.js', exportName: 'Entry' },
 ): void {
-  setClientEntryBoundaryOwner(marker, identity, { dispose: onDispose, render() {} })
+  setClientEntryBoundaryOwner(marker, marker, identity, { dispose: onDispose, render() {} })
 }
 
 function diffDomNodes(current: Node[], next: Node[], data: FrameContext['data'] = {}) {
@@ -401,7 +401,7 @@ describe('diffNodes', () => {
       let innerEnd = document.createComment('/rmx:h')
       let owned = document.createElement('section')
       let outerEnd = document.createComment('/rmx:h')
-      let dataKey = 'data-key'
+      let dataKey = 'data-rmx-key'
       owned.setAttribute(dataKey, 'entry')
       current.append(outerStart, innerStart, innerContent, innerEnd, owned, outerEnd)
 
@@ -519,10 +519,10 @@ describe('diffNodes', () => {
   })
 
   describe('keyed diffs', () => {
-    it('retains keyed elements via data-key', () => {
+    it('retains keyed elements via data-rmx-key', () => {
       let container = document.createElement('div')
       container.innerHTML =
-        '<ul><li data-key="a">A</li><li data-key="b">B</li><li data-key="c">C</li></ul>'
+        '<ul><li data-rmx-key="a">A</li><li data-rmx-key="b">B</li><li data-rmx-key="c">C</li></ul>'
       let list = container.querySelector('ul')
       invariant(list)
 
@@ -533,7 +533,7 @@ describe('diffNodes', () => {
 
       diffDom(
         container,
-        '<ul><li data-key="b">B</li><li data-key="a">A</li><li data-key="c">C</li></ul>',
+        '<ul><li data-rmx-key="b">B</li><li data-rmx-key="a">A</li><li data-rmx-key="c">C</li></ul>',
       )
 
       let updatedList = container.querySelector('ul')
@@ -542,7 +542,7 @@ describe('diffNodes', () => {
       expect(updatedList.children.item(1)).toBe(a)
       expect(updatedList.children.item(2)).toBe(c)
       expect(updatedList.innerHTML).toBe(
-        '<li data-key="b">B</li><li data-key="a">A</li><li data-key="c">C</li>',
+        '<li data-rmx-key="b">B</li><li data-rmx-key="a">A</li><li data-rmx-key="c">C</li>',
       )
     })
   })
@@ -627,16 +627,16 @@ describe('diffNodes', () => {
       expect(button.isConnected).toBe(false)
     })
 
-    it('preserves rmx-preserve-dom element attributes and children', () => {
+    it('preserves data-rmx-preserve-dom element attributes and children', () => {
       let container = document.createElement('div')
       container.innerHTML =
-        '<div rmx-preserve-dom data-state="client"><button>Client</button></div>'
+        '<div data-rmx-preserve-dom data-state="client"><button>Client</button></div>'
       let div = container.querySelector('div')
       invariant(div)
       let button = div.querySelector('button')
       invariant(button)
 
-      diffDom(container, '<div rmx-preserve-dom data-state="server"><span>Server</span></div>')
+      diffDom(container, '<div data-rmx-preserve-dom data-state="server"><span>Server</span></div>')
 
       expect(container.firstElementChild).toBe(div)
       expect(div.getAttribute('data-state')).toBe('client')
@@ -644,7 +644,156 @@ describe('diffNodes', () => {
       expect(div.innerHTML).toBe('<button>Client</button>')
     })
 
-    it('preserves rmx-preserve-dom custom element children added during initialization', () => {
+    it('preserves named attributes while reconciling other attributes and children', () => {
+      let container = document.createElement('div')
+      container.innerHTML =
+        '<div class="layout" data-theme="light" title="Old" data-page="old"><p>Old</p></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+      div.classList.add('dark')
+      div.setAttribute('data-theme', 'dark')
+
+      diffDom(
+        container,
+        '<div data-rmx-preserve-attrs=" class\tdata-theme\nclass " class="new-layout" title="New" lang="en"><p>New</p></div>',
+      )
+
+      expect(container.firstElementChild).toBe(div)
+      expect(div.className).toBe('layout dark')
+      expect(div.getAttribute('data-theme')).toBe('dark')
+      expect(div.getAttribute('title')).toBe('New')
+      expect(div.getAttribute('lang')).toBe('en')
+      expect(div.hasAttribute('data-page')).toBe(false)
+      expect(div.innerHTML).toBe('<p>New</p>')
+    })
+
+    it('preserves the absence of attributes removed by client code', () => {
+      let container = document.createElement('div')
+      container.innerHTML = '<div class="dark" data-theme="dark"></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+      div.removeAttribute('class')
+      div.removeAttribute('data-theme')
+
+      diffDom(
+        container,
+        '<div data-rmx-preserve-attrs="class data-theme" class="dark" data-theme="dark"></div>',
+      )
+
+      expect(div.hasAttribute('class')).toBe(false)
+      expect(div.hasAttribute('data-theme')).toBe(false)
+    })
+
+    it('uses the incoming preservation list when ownership changes', () => {
+      let container = document.createElement('div')
+      container.innerHTML =
+        '<div data-rmx-preserve-attrs="class data-theme" class="dark" data-theme="dark"></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(
+        container,
+        '<div data-rmx-preserve-attrs="data-theme" class="light" data-theme="light"></div>',
+      )
+
+      expect(div.className).toBe('light')
+      expect(div.getAttribute('data-theme')).toBe('dark')
+      expect(div.getAttribute('data-rmx-preserve-attrs')).toBe('data-theme')
+    })
+
+    it('returns attributes to normal reconciliation when the preservation list is empty', () => {
+      let container = document.createElement('div')
+      container.innerHTML =
+        '<div data-rmx-preserve-attrs="class data-theme" class="dark" data-theme="dark"></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(container, '<div data-rmx-preserve-attrs="" class="light"></div>')
+
+      expect(div.className).toBe('light')
+      expect(div.hasAttribute('data-theme')).toBe(false)
+      expect(div.getAttribute('data-rmx-preserve-attrs')).toBe('')
+    })
+
+    it('returns attributes to normal reconciliation when the preservation list is omitted', () => {
+      let container = document.createElement('div')
+      container.innerHTML =
+        '<div data-rmx-preserve-attrs="class data-theme" class="dark" data-theme="dark"></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(container, '<div data-theme="light"></div>')
+
+      expect(div.hasAttribute('class')).toBe(false)
+      expect(div.getAttribute('data-theme')).toBe('light')
+      expect(div.hasAttribute('data-rmx-preserve-attrs')).toBe(false)
+    })
+
+    it('preserves named SVG attributes without changing their case', () => {
+      let container = document.createElement('div')
+      container.innerHTML = '<svg viewBox="0 0 10 10"><circle r="2"></circle></svg>'
+      let svg = container.querySelector('svg')
+      invariant(svg)
+      svg.setAttribute('viewBox', '0 0 20 20')
+
+      diffDom(
+        container,
+        '<svg data-rmx-preserve-attrs="viewBox" viewBox="0 0 10 10"><circle r="4"></circle></svg>',
+      )
+
+      expect(svg.getAttribute('viewBox')).toBe('0 0 20 20')
+      expect(svg.querySelector('circle')?.getAttribute('r')).toBe('4')
+    })
+
+    it('does not preserve descendants with an attribute preservation list', () => {
+      let container = document.createElement('div')
+      container.innerHTML = '<div class="dark"><span class="old">Old</span></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(
+        container,
+        '<div data-rmx-preserve-attrs="class" class="light"><span class="new">New</span></div>',
+      )
+
+      expect(div.className).toBe('dark')
+      expect(div.innerHTML).toBe('<span class="new">New</span>')
+    })
+
+    it('can replace and remove elements with preserved attributes', () => {
+      let container = document.createElement('div')
+      container.innerHTML = '<div data-rmx-preserve-attrs="class" class="dark">Old</div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(container, '<section data-rmx-preserve-attrs="class" class="light">New</section>')
+
+      expect(container.contains(div)).toBe(false)
+      expect(container.firstElementChild?.getAttribute('class')).toBe('light')
+      expect(container.textContent).toBe('New')
+
+      diffDom(container, '')
+
+      expect(container.childNodes).toHaveLength(0)
+    })
+
+    it('preserves the whole DOM when both preservation attributes are present', () => {
+      let container = document.createElement('div')
+      container.innerHTML = '<div class="dark" data-theme="dark"><p>Client</p></div>'
+      let div = container.querySelector('div')
+      invariant(div)
+
+      diffDom(
+        container,
+        '<div data-rmx-preserve-dom data-rmx-preserve-attrs="class" class="light" data-theme="light"><p>Server</p></div>',
+      )
+
+      expect(div.className).toBe('dark')
+      expect(div.getAttribute('data-theme')).toBe('dark')
+      expect(div.innerHTML).toBe('<p>Client</p>')
+    })
+
+    it('preserves data-rmx-preserve-dom custom element children added during initialization', () => {
       let tagName = 'mock-pagefind-modal-trigger-lifecycle'
       if (!customElements.get(tagName)) {
         customElements.define(
@@ -680,10 +829,10 @@ describe('diffNodes', () => {
         let button = trigger.querySelector('button')
         invariant(button)
 
-        diffDom(container, `<${tagName} rmx-preserve-dom></${tagName}>`)
+        diffDom(container, `<${tagName} data-rmx-preserve-dom></${tagName}>`)
 
         expect(container.firstElementChild).toBe(trigger)
-        expect(trigger.hasAttribute('rmx-preserve-dom')).toBe(true)
+        expect(trigger.hasAttribute('data-rmx-preserve-dom')).toBe(true)
         expect(trigger.querySelector('button')).toBe(button)
         expect(button.isConnected).toBe(true)
       } finally {
@@ -691,7 +840,7 @@ describe('diffNodes', () => {
       }
     })
 
-    it('can pair rmx-preserve-dom elements with data-key before index fallback moves them', () => {
+    it('can pair data-rmx-preserve-dom elements with data-rmx-key before index fallback moves them', () => {
       let tagName = 'mock-pagefind-modal-lifecycle'
       let connects = 0
       let disconnects = 0
@@ -715,7 +864,7 @@ describe('diffNodes', () => {
       document.body.appendChild(container)
 
       try {
-        container.innerHTML = `<section><span>Old</span><${tagName} data-key="modal" rmx-preserve-dom><dialog>Client</dialog></${tagName}></section>`
+        container.innerHTML = `<section><span>Old</span><${tagName} data-rmx-key="modal" data-rmx-preserve-dom><dialog>Client</dialog></${tagName}></section>`
         let modal = container.querySelector(tagName)
         invariant(modal)
         let dialog = modal.querySelector('dialog')
@@ -725,7 +874,7 @@ describe('diffNodes', () => {
 
         diffDom(
           container,
-          `<section><span>New</span><p>Inserted</p><${tagName} data-key="modal" rmx-preserve-dom></${tagName}></section>`,
+          `<section><span>New</span><p>Inserted</p><${tagName} data-rmx-key="modal" data-rmx-preserve-dom></${tagName}></section>`,
         )
 
         expect(container.querySelector(tagName)).toBe(modal)
@@ -738,7 +887,7 @@ describe('diffNodes', () => {
       }
     })
 
-    it('does not reconnect keyed rmx-preserve-dom elements during reordering', () => {
+    it('does not reconnect keyed data-rmx-preserve-dom elements during reordering', () => {
       let tagName = 'mock-pagefind-modal-stationary'
       let connects = 0
       let disconnects = 0
@@ -762,7 +911,7 @@ describe('diffNodes', () => {
       document.body.appendChild(container)
 
       try {
-        container.innerHTML = `<section><${tagName} data-key="modal" rmx-preserve-dom><dialog>Client</dialog></${tagName}><p>Old</p></section>`
+        container.innerHTML = `<section><${tagName} data-rmx-key="modal" data-rmx-preserve-dom><dialog>Client</dialog></${tagName}><p>Old</p></section>`
         let modal = container.querySelector(tagName)
         invariant(modal)
         let dialog = modal.querySelector('dialog')
@@ -772,7 +921,7 @@ describe('diffNodes', () => {
 
         diffDom(
           container,
-          `<section><p>New</p><${tagName} data-key="modal" rmx-preserve-dom></${tagName}></section>`,
+          `<section><p>New</p><${tagName} data-rmx-key="modal" data-rmx-preserve-dom></${tagName}></section>`,
         )
 
         expect(container.querySelector(tagName)).toBe(modal)

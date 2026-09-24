@@ -1,4 +1,4 @@
-import { createFrame, type Frame } from './frame.ts'
+import { createFrame, NamedFrameRegistry, type Frame } from './frame.ts'
 import { createScheduler } from './vdom.ts'
 import { createStyleManager } from '../style/index.ts'
 import type { FrameHandle, Handle } from './component.ts'
@@ -7,6 +7,7 @@ import type { ComponentErrorEvent } from './error-event.ts'
 import type { LoadModule, ResolveFrame, ResolveFrameOptions } from './frame.ts'
 import { startNavigationListener } from './navigation.ts'
 import { TypedEventTarget } from './typed-event-target.ts'
+import type { ProcessClientEntryPreloads } from './module-preloader.ts'
 
 /**
  * Options for starting the client runtime with {@link run}.
@@ -23,10 +24,15 @@ export interface RunInit {
   /**
    * Resolves browser-loaded `<Frame>` content.
    *
-   * Defaults to fetching the frame source as HTML with the submitted form data,
-   * method, encoding, and abort signal.
+   * Defaults to fetching the frame source as HTML with the submitted form data, method, encoding,
+   * and abort signal. The default resolver only fetches from the document origin, including
+   * redirects, but does not sanitize the returned HTML. Custom resolvers own their request,
+   * redirect, and content trust policies.
    */
   resolveFrame?: ResolveFrame
+
+  /** Processes module preloads discovered in late client entry responses before activation. */
+  processClientEntryPreloads?: ProcessClientEntryPreloads
 }
 
 /**
@@ -61,24 +67,27 @@ export function getTopFrame(): FrameHandle {
   return topFrame.handle
 }
 
-const namedFrames = new Map<string, FrameHandle>()
+const namedFrames = new NamedFrameRegistry()
 /**
- * Returns a named frame handle, falling back to the top frame when not found.
+ * Returns a named frame handle.
  *
  * @param name Name of the frame to look up.
- * @returns The matching frame handle or the top frame.
+ * @returns The matching frame handle, or `undefined` when not found.
  */
-export function getNamedFrame(name: string): FrameHandle {
-  return namedFrames.get(name) ?? getTopFrame()
+export function getNamedFrame(name: string): FrameHandle | undefined {
+  return namedFrames.get(name)
 }
 
 // Frame reloads can receive raw FormData without going through form navigation. Encode it here so
 // manual reloads use the requested form encoding instead of always sending multipart bodies.
 function getRequestBody(options?: ResolveFrameOptions): BodyInit | undefined {
   let formData = options?.formData
-  if (!formData || options?.method?.toLowerCase() === 'get') return
+  let method = options?.method
+  if (!formData || !method || ['get', 'head'].includes(method.toLowerCase())) return
 
-  if (options?.encType === 'text/plain') {
+  let encType = options?.encType
+
+  if (encType === 'text/plain') {
     let body = ''
     for (let [name, value] of formData) {
       name = normalizeLineBreaks(name)
@@ -88,7 +97,7 @@ function getRequestBody(options?: ResolveFrameOptions): BodyInit | undefined {
     return new Blob([body], { type: 'text/plain' })
   }
 
-  if (options?.encType !== 'application/x-www-form-urlencoded') return formData
+  if (encType !== 'application/x-www-form-urlencoded') return formData
 
   let body = new URLSearchParams()
   for (let [name, value] of formData) {
@@ -106,10 +115,12 @@ async function defaultResolveFrame(src: string, options?: ResolveFrameOptions): 
     body: getRequestBody(options),
     headers: { Accept: 'text/html' },
     method: options?.method,
+    mode: 'same-origin',
     signal: options?.signal,
   })
 
-  if (!response.ok) {
+  let isHtml = response.headers.get('Content-Type')?.toLowerCase().includes('text/html')
+  if (response.status >= 500 || (response.status >= 300 && !isHtml)) {
     throw new Error(`Failed to resolve frame: ${response.status} ${response.statusText}`.trimEnd())
   }
 
@@ -142,6 +153,7 @@ export function run(init: RunInit): AppRuntime {
     moduleLoads: new Map(),
     frameInstances: new WeakMap(),
     namedFrames,
+    processClientEntryPreloads: init.processClientEntryPreloads,
   })
 
   let appController = new AbortController()

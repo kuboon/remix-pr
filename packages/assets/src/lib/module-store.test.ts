@@ -9,7 +9,6 @@ import type { TransformedModule } from './scripts/transform.ts'
 
 function createTransformedModule(): TransformedModule {
   return {
-    fingerprint: null,
     hmr: {
       acceptedDeps: [],
       selfAccepting: false,
@@ -32,9 +31,9 @@ function createEmittedModule(): EmittedModule {
     code: {
       content: 'export const value = 1',
       etag: 'W/"code"',
+      fingerprint: 'code',
     },
     fingerprint: null,
-    importUrls: [],
     sourceMap: null,
   }
 }
@@ -50,22 +49,27 @@ function createResolvedModule(
 
   return {
     deps: options.deps ?? [],
-    fingerprint: null,
     hmr: {
       acceptedDeps: (options.acceptedDeps ?? []).map((depPath, index) => ({
+        compiledSpecifier: depPath,
         depPath,
         end: index,
+        specifier: depPath,
         start: index,
       })),
       selfAccepting: false,
       usesImportMetaHot: false,
     },
     identityPath,
+    importRewrites: [],
     imports: [],
+    packageJsonPath: null,
     trackedFiles: [identityPath],
     rawCode: 'export const value = 1',
     resolvedPath: identityPath,
+    runtimeImports: [],
     sourceMap: null,
+    staticDeps: [],
     stableUrlPathname: `/assets${identityPath}`,
   }
 }
@@ -321,6 +325,61 @@ describe('createModuleStore', () => {
     store.setResolved('/app/entry.ts', resolved, [resolved])
 
     assert.deepEqual([...store.getImporters('/app/value.ts')], ['/app/entry.ts'])
+  })
+
+  it('invalidates transitive importers after file events when configured', () => {
+    let store = createModuleStore<TransformedModule, ResolvedModule, EmittedModule>({
+      getDependencies(resolved) {
+        return resolved.deps
+      },
+      invalidateImportersOnFileEvent: true,
+    })
+    store.setResolved(
+      '/app/entry.ts',
+      createResolvedModule({ deps: ['/app/barrel.ts'], identityPath: '/app/entry.ts' }),
+      [{ trackedFiles: ['/app/entry.ts'] }],
+    )
+    store.setResolved(
+      '/app/barrel.ts',
+      createResolvedModule({ deps: ['/app/value.ts'], identityPath: '/app/barrel.ts' }),
+      [{ trackedFiles: ['/app/barrel.ts'] }],
+    )
+    store.setResolved('/app/value.ts', createResolvedModule({ identityPath: '/app/value.ts' }), [
+      { trackedFiles: ['/app/value.ts'] },
+    ])
+    store.setResolved(
+      '/app/unrelated.ts',
+      createResolvedModule({ identityPath: '/app/unrelated.ts' }),
+      [{ trackedFiles: ['/app/unrelated.ts'] }],
+    )
+
+    store.invalidateForFileEvent('/app/value.ts', 'change')
+
+    assert.equal(store.isResolvedFresh(store.get('/app/value.ts')), false)
+    assert.equal(store.isResolvedFresh(store.get('/app/barrel.ts')), false)
+    assert.equal(store.isResolvedFresh(store.get('/app/entry.ts')), false)
+    assert.equal(store.isResolvedFresh(store.get('/app/unrelated.ts')), true)
+  })
+
+  it('does not invalidate importers after file events by default', () => {
+    let store = createModuleStore<TransformedModule, ResolvedModule, EmittedModule>({
+      getDependencies(resolved) {
+        return resolved.deps
+      },
+    })
+    store.setResolved(
+      '/app/entry.ts',
+      createResolvedModule({ deps: ['/app/value.ts'], identityPath: '/app/entry.ts' }),
+      [{ trackedFiles: ['/app/entry.ts'] }],
+    )
+    store.setResolved('/app/value.ts', createResolvedModule({ identityPath: '/app/value.ts' }), [
+      { trackedFiles: ['/app/value.ts'] },
+    ])
+
+    store.invalidateForFileEvent('/app/value.ts', 'change')
+
+    assert.equal(store.isResolvedFresh(store.get('/app/value.ts')), false)
+    assert.equal(store.isResolvedFresh(store.get('/app/entry.ts')), true)
   })
 
   it('indexes accepted importers from resolved module dependencies', () => {

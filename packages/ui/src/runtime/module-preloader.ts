@@ -1,11 +1,13 @@
-const SERVER_MODULE_PRELOAD_SELECTOR = 'link[data-rmx][rel~="modulepreload" i][href]'
+const SERVER_MODULE_PRELOAD_SELECTOR = 'link[data-rmx-module-preload][rel~="modulepreload" i][href]'
 
 interface ModulePreloader {
   adoptInitialPreloadLinks(source: ParentNode): void
-  consumePreloadLinks(source: ParentNode): void
+  consumePreloadLinks(source: ParentNode, process?: ProcessClientEntryPreloads): Promise<void>
   hasActivePreloads(): boolean
   isActivePreload(node: Node): boolean
 }
+
+export type ProcessClientEntryPreloads = (preloads: string[]) => string[] | Promise<string[]>
 
 const modulePreloaders = new WeakMap<Document, ModulePreloader>()
 
@@ -36,7 +38,7 @@ function createModulePreloader(doc: Document): ModulePreloader {
     let link = doc.createElement('link')
     link.rel = 'modulepreload'
     link.href = href
-    link.setAttribute('data-rmx', '')
+    link.setAttribute('data-rmx-module-preload', '')
     let url = link.href
     if (requestedUrls.has(url)) return
     requestedUrls.add(url)
@@ -74,7 +76,7 @@ function createModulePreloader(doc: Document): ModulePreloader {
         let observerLink = doc.createElement('link')
         observerLink.rel = 'modulepreload'
         observerLink.href = initialLink.href
-        observerLink.setAttribute('data-rmx', '')
+        observerLink.setAttribute('data-rmx-module-preload', '')
         let url = initialLink.href
         requestedUrls.add(url)
         activateLink(initialLink)
@@ -96,14 +98,15 @@ function createModulePreloader(doc: Document): ModulePreloader {
         doc.head.append(observerLink)
       }
     },
-    consumePreloadLinks(source) {
+    async consumePreloadLinks(source, process) {
       let hrefs: string[] = []
       for (let link of source.querySelectorAll<HTMLLinkElement>(SERVER_MODULE_PRELOAD_SELECTOR)) {
         let href = link.getAttribute('href')
         link.remove()
         if (href) hrefs.push(href)
       }
-      for (let href of hrefs) preload(href)
+      let processedHrefs = process ? await process(hrefs) : hrefs
+      for (let href of processedHrefs) preload(href)
     },
     hasActivePreloads() {
       return activeLinkCount > 0

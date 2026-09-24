@@ -28,7 +28,7 @@ type BoundarySiblingUnit = {
 
 type SiblingUnit = NodeSiblingUnit | BoundarySiblingUnit
 
-const REMIX_PRESERVE_DOM_ATTRIBUTE = 'rmx-preserve-dom'
+const REMIX_PRESERVE_DOM_ATTRIBUTE = 'data-rmx-preserve-dom'
 
 export function diffNodes(curr: Node[], next: Node[], context: FrameContext) {
   let parent = curr[0]?.parentNode ?? context.regionParent ?? null
@@ -80,14 +80,17 @@ function diffNode(current: Node, next: Node, context: FrameContext): ChildNode |
           if (nextMarkerData.status === 'resolved') {
             let nextEnd = findFrameEndMarker(next)
             let nextContent = collectFrameContentFragment(current.ownerDocument, next, nextEnd)
-            void frame.renderMarkerContent(
+            let render = frame.renderMarkerContent(
               { ...nextMarkerData, id: getFrameId(next) },
               nextContent,
               {
                 data: context.data,
                 signal: context.signal,
+                reconciliationTracker: context.reconciliationTracker,
               },
             )
+            if (context.reconciliationTracker) context.reconciliationTracker.waitFor(render)
+            else void render
             return nextEnd
           }
 
@@ -135,14 +138,16 @@ function diffNode(current: Node, next: Node, context: FrameContext): ChildNode |
   }
 }
 
-function diffElementAttributes(current: Element, next: Element): void {
+export function diffElementAttributes(current: Element, next: Element): void {
   let prevAttrNames = current.getAttributeNames()
   let nextAttrNames = next.getAttributeNames()
+  let preservedNames = next.getAttribute('data-rmx-preserve-attrs')?.split(/[\t\n\f\r ]+/)
 
   let nextNameSet = new Set(nextAttrNames)
 
   // Removals
   for (let name of prevAttrNames) {
+    if (preservedNames?.includes(name)) continue
     if (!nextNameSet.has(name)) {
       if (shouldPreserveLiveAttribute(current, next, name)) continue
       current.removeAttribute(name)
@@ -151,6 +156,7 @@ function diffElementAttributes(current: Element, next: Element): void {
 
   // Additions/updates
   for (let name of nextAttrNames) {
+    if (preservedNames?.includes(name)) continue
     let prevVal = current.getAttribute(name)
     let nextVal = next.getAttribute(name)
     if (prevVal !== nextVal) {
@@ -237,20 +243,15 @@ function isPopoverOpen(element: Element): boolean {
 }
 
 function diffElementChildren(current: Element, next: Element, context: FrameContext): void {
-  let currentChildren: Node[]
-
-  // Allow actively managed preload link tags in the head to stay in the document
-  // during diffing rather than removing them which aborts the preload in Safari
-  if (context.isActiveModulePreload && current === current.ownerDocument.head) {
-    currentChildren = []
-    for (let node of current.childNodes) {
-      if (!context.isActiveModulePreload(node)) currentChildren.push(node)
-    }
-  } else {
-    currentChildren = Array.from(current.childNodes)
+  let shouldPreserveHeadNode = context.shouldPreserveHeadNode
+  let preservedHeadNodes: ChildNode[] = []
+  let currentChildren = Array.from(current.childNodes)
+  if (current === current.ownerDocument.head && shouldPreserveHeadNode) {
+    preservedHeadNodes = currentChildren.filter(shouldPreserveHeadNode)
+    currentChildren = currentChildren.filter((node) => !shouldPreserveHeadNode(node))
   }
   let nextChildren = Array.from(next.childNodes)
-  diffSiblingUnits(currentChildren, nextChildren, current, null, context)
+  diffSiblingUnits(currentChildren, nextChildren, current, preservedHeadNodes[0] ?? null, context)
 }
 
 function diffSiblingUnits(
@@ -446,7 +447,7 @@ function parseSiblingUnits(nodes: Node[]): SiblingUnit[] {
 
 function getSiblingUnitKey(unit: SiblingUnit): string | undefined {
   if (unit.kind !== 'node' || !isElement(unit.node)) return
-  return unit.node.getAttribute('data-key') ?? undefined
+  return unit.node.getAttribute('data-rmx-key') ?? undefined
 }
 
 function siblingUnitsComparable(current: SiblingUnit, next: SiblingUnit): boolean {

@@ -2,6 +2,36 @@
 
 This is the changelog for [`data-table`](https://github.com/remix-run/remix/tree/main/packages/data-table). It follows [semantic versioning](https://semver.org/).
 
+## v0.6.0
+
+### Minor Changes
+
+- BREAKING CHANGE: Dotted string values passed to `eq()`, `ne()`, `gt()`, `gte()`, `lt()`, and `lte()` are now treated as scalar values. Use table column references, such as `eq(accounts.id, projects.account_id)`, for column-to-column comparisons.
+
+- Add `compileOrderByDirection()` to `@remix-run/data-table/sql-helpers` for adapters that need to validate and compile case-insensitive `asc` and `desc` values.
+
+### Patch Changes
+
+- Reject update and delete operations when a supplied `where` clause is structurally unconditional, including empty object filters and empty `notIn` predicates.
+
+## v0.5.1
+
+### Patch Changes
+
+- Fixed `hasManyThrough` eager loads with `orderBy(...).limit(...)` returning the wrong related rows when a parent has multiple through records. Related rows are now sorted before pagination is applied for each parent (see #11453).
+
+## v0.5.0
+
+### Minor Changes
+
+- Add a `rollback` command to `runRemixDb()`.
+
+  Reverts applied migrations newest first, bounded by `step` (default `1`) or `to` (inclusive), with optional `dryRun`. This is what backs `remix db rollback`, and it gives hosts embedding the data-table CLI the same command (see #11723).
+
+### Patch Changes
+
+- Allow `and()` and `or()` to compose object shorthand filters, matching the documented `where: or({ status: 'pending' }, { status: 'processing' })` usage.
+
 ## v0.4.0
 
 ### Minor Changes

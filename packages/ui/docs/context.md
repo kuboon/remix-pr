@@ -31,17 +31,21 @@ function ThemeProvider(handle: Handle<{ children?: RemixNode }, { theme: 'light'
 }
 
 function ThemedContent(handle: Handle) {
-  let { theme } = handle.context.get(ThemeProvider)
+  return () => {
+    let { theme } = handle.context.get(ThemeProvider)
 
-  return () => (
-    <div mix={[css({ backgroundColor: theme === 'dark' ? '#000' : '#fff' })]}>
-      Current theme: {theme}
-    </div>
-  )
+    return (
+      <div mix={[css({ backgroundColor: theme === 'dark' ? '#000' : '#fff' })]}>
+        Current theme: {theme}
+      </div>
+    )
+  }
 }
 ```
 
 **Important:** `handle.context.set()` does not cause any updates—it simply stores a value. If you want the component tree to update when context changes, you must call `handle.update()` after setting the context (as shown above).
+
+Read context inside render when the provider replaces its value with `context.set(...)`. A value read during setup stays the value from that setup call. A stable object, such as the event target shown below, can be captured during setup when the provider keeps that object's identity.
 
 ## Component Identity
 
@@ -120,11 +124,7 @@ function ThemedContent(handle: Handle) {
   let theme = handle.context.get(ThemeProvider)
 
   // Subscribe to granular updates
-  addEventListeners(theme, handle.signal, {
-    change() {
-      handle.update()
-    },
-  })
+  theme.addEventListener('change', () => handle.update(), { signal: handle.signal })
 
   return () => (
     <div mix={[css({ backgroundColor: theme.value === 'dark' ? '#000' : '#fff' })]}>
@@ -179,11 +179,7 @@ function AppProvider(handle: Handle<{ children?: RemixNode }, AppContext>) {
 function UserDisplay(handle: Handle) {
   let context = handle.context.get(AppProvider)
 
-  addEventListeners(context, handle.signal, {
-    userChange() {
-      handle.update()
-    },
-  })
+  context.addEventListener('userChange', () => handle.update(), { signal: handle.signal })
 
   return () => <div>{context.user?.name ?? 'Not logged in'}</div>
 }
@@ -192,4 +188,4 @@ function UserDisplay(handle: Handle) {
 ## See Also
 
 - [Handle API](./handle.md) - `handle.context` reference
-- [Events](./events.md) - `addEventListeners()` for subscribing to EventTargets
+- [Events](./events.md) - subscribing to event targets

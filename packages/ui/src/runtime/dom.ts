@@ -1,6 +1,7 @@
 import type { StyleProps } from '../style/style.ts'
 import type { RemixNode } from './jsx.ts'
 import type { MixInput } from './mixins/mixin.ts'
+import type { UnsafeHTML } from './unsafe-html.ts'
 
 /**
  * Adapted from Preact:
@@ -35,11 +36,11 @@ export interface HostProps<eventTarget extends EventTarget> {
   /** Mixins to apply to the element. */
   mix?: MixInput<eventTarget>
   /**
-   * Set the innerHTML of the element directly.
-   * When provided, children are ignored.
-   * Use with caution as this can expose XSS vulnerabilities if the content is not sanitized.
+   * Raw HTML to insert into the element. Create this value with `unsafeHTML()`.
+   *
+   * When provided, children are ignored. Remix does not sanitize or otherwise modify the HTML.
    */
-  innerHTML?: string
+  innerHTML?: UnsafeHTML
 }
 
 /**
@@ -1495,10 +1496,10 @@ export interface AllHTMLProps<eventTarget extends EventTarget = EventTarget>
   spellCheck?: Trackable<Booleanish | undefined>
   /** The `src` HTML attribute. */
   src?: Trackable<string | undefined>
-  /** The `srcDoc` HTML attribute. */
-  srcDoc?: Trackable<string | undefined>
-  /** The `srcdoc` HTML attribute. */
-  srcdoc?: Trackable<string | undefined>
+  /** Raw HTML for the iframe document. Create this value with `unsafeHTML()`. */
+  srcDoc?: Trackable<UnsafeHTML | undefined>
+  /** Raw HTML for the iframe document. Create this value with `unsafeHTML()`. */
+  srcdoc?: Trackable<UnsafeHTML | undefined>
   /** The `srcLang` HTML attribute. */
   srcLang?: Trackable<string | undefined>
   /** The `srclang` HTML attribute. */
@@ -1561,10 +1562,10 @@ export interface AllHTMLProps<eventTarget extends EventTarget = EventTarget>
    * Preserve the current element attributes and children during frame DOM reconciliation.
    *
    * Server rendering and initial hydration still process this element and its children. On later
-   * frame reloads, a matched element with `rmx-preserve-dom` keeps its live DOM so custom elements
-   * and imperative widgets can own their subtree.
+   * frame reloads, a matched element with `data-rmx-preserve-dom` keeps its live DOM so custom
+   * elements and imperative widgets can own their subtree.
    */
-  'rmx-preserve-dom'?: Trackable<boolean | '' | undefined>
+  'data-rmx-preserve-dom'?: Trackable<boolean | '' | undefined>
 
   // RDFa Attributes
   /** The `about` HTML attribute. */
@@ -1786,14 +1787,16 @@ export interface PartialAnchorHTMLProps<
   referrerPolicy?: Trackable<HTMLAttributeReferrerPolicy | undefined>
 
   // Non-standard Attributes
-  /** The `rmx-target` HTML attribute. */
-  'rmx-target'?: Trackable<string | undefined>
-  /** The `rmx-src` HTML attribute. */
-  'rmx-src'?: Trackable<string | undefined>
+  /** The `data-rmx-document` HTML attribute. */
+  'data-rmx-document'?: Trackable<boolean | '' | undefined>
+  /** The `data-rmx-target` HTML attribute. */
+  'data-rmx-target'?: Trackable<string | undefined>
+  /** The `data-rmx-src` HTML attribute. */
+  'data-rmx-src'?: Trackable<string | undefined>
   /** Controls how activating this anchor updates the current history entry. */
-  'rmx-history'?: Trackable<'push' | 'replace' | undefined>
-  /** The `rmx-reset-scroll` HTML attribute. */
-  'rmx-reset-scroll'?: Trackable<string | undefined>
+  'data-rmx-history'?: Trackable<'push' | 'replace' | undefined>
+  /** The `data-rmx-reset-scroll` HTML attribute. */
+  'data-rmx-reset-scroll'?: Trackable<string | undefined>
 }
 
 export type AnchorAriaRoles =
@@ -2297,8 +2300,16 @@ export interface FormHTMLProps<
   target?: Trackable<string | undefined>
 
   // Non-standard Attributes
+  /** The `data-rmx-document` HTML attribute. */
+  'data-rmx-document'?: Trackable<boolean | '' | undefined>
+  /** The `data-rmx-target` HTML attribute. */
+  'data-rmx-target'?: Trackable<string | undefined>
+  /** The `data-rmx-src` HTML attribute. */
+  'data-rmx-src'?: Trackable<string | undefined>
   /** Overrides how submitting this form updates the current history entry. */
-  'rmx-history'?: Trackable<'push' | 'replace' | undefined>
+  'data-rmx-history'?: Trackable<'push' | 'replace' | undefined>
+  /** The `data-rmx-reset-scroll` HTML attribute. */
+  'data-rmx-reset-scroll'?: Trackable<string | undefined>
 }
 
 /**
@@ -2391,10 +2402,10 @@ export interface IframeHTMLProps<
   seamless?: Trackable<boolean | undefined>
   /** The `src` HTML attribute. */
   src?: Trackable<string | undefined>
-  /** The `srcdoc` HTML attribute. */
-  srcdoc?: Trackable<string | undefined>
-  /** The `srcDoc` HTML attribute. */
-  srcDoc?: Trackable<string | undefined>
+  /** Raw HTML for the iframe document. Create this value with `unsafeHTML()`. */
+  srcdoc?: Trackable<UnsafeHTML | undefined>
+  /** Raw HTML for the iframe document. Create this value with `unsafeHTML()`. */
+  srcDoc?: Trackable<UnsafeHTML | undefined>
   /** The `width` HTML attribute. */
   width?: Trackable<number | string | undefined>
 }

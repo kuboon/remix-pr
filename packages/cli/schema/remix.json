@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://remix.run/schemas/remix.json",
   "title": "Remix CLI configuration",
   "description": "Configuration for the Remix command-line interface.",
   "type": "object",
@@ -9,6 +8,9 @@
     "$schema": {
       "type": "string",
       "description": "JSON Schema used by editors to validate this file."
+    },
+    "assets": {
+      "$ref": "#/$defs/assets"
     },
     "db": {
       "$ref": "#/$defs/db"
@@ -21,6 +23,52 @@
     }
   },
   "$defs": {
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowFiles", "basePath"],
+      "properties": {
+        "allowFiles": {
+          "$ref": "#/$defs/stringArray",
+          "description": "File paths and glob patterns that may be served."
+        },
+        "allowPackages": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Package names whose files and dependencies may be served."
+        },
+        "basePath": {
+          "type": "string",
+          "description": "Public URL prefix for served assets."
+        },
+        "denyFiles": {
+          "$ref": "#/$defs/stringArray",
+          "description": "File paths and glob patterns that must not be served."
+        },
+        "mounts": {
+          "type": "object",
+          "description": "Directories keyed by public URL paths relative to basePath.",
+          "additionalProperties": { "type": "string" }
+        },
+        "files": {
+          "$ref": "#/$defs/assetsFiles"
+        },
+        "rootDir": {
+          "type": "string",
+          "description": "Root directory for asset file paths, relative to this config file."
+        }
+      }
+    },
+    "assetsFiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extensions"],
+      "properties": {
+        "extensions": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Additional file extensions served without script or style compilation."
+        }
+      }
+    },
     "db": {
       "type": "object",
       "additionalProperties": false,
@@ -30,7 +78,8 @@
           "oneOf": [
             { "$ref": "#/$defs/dbSqliteAdapter" },
             { "$ref": "#/$defs/dbPostgresAdapter" },
-            { "$ref": "#/$defs/dbMysqlAdapter" }
+            { "$ref": "#/$defs/dbMysqlAdapter" },
+            { "$ref": "#/$defs/dbModuleAdapter" }
           ]
         },
         "migrations": {
@@ -76,6 +125,27 @@
         "connectionString": { "$ref": "#/$defs/dbString" },
         "maintenanceDatabase": { "type": "string" },
         "template": { "type": "string" }
+      }
+    },
+    "dbModuleAdapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "module"],
+      "properties": {
+        "type": { "const": "module" },
+        "module": {
+          "type": "string",
+          "description": "Module specifier exporting a database factory. Relative paths resolve from this file."
+        },
+        "export": {
+          "type": "string",
+          "description": "Name of the exported factory. Defaults to the default export."
+        },
+        "connection": { "$ref": "#/$defs/dbString" },
+        "options": {
+          "type": "object",
+          "description": "Values passed through to the database factory."
+        }
       }
     },
     "dbMysqlAdapter": {

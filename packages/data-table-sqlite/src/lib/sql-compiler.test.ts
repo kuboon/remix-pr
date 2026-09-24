@@ -341,6 +341,19 @@ describe('sqlite sql-compiler', () => {
       })
     })
 
+    it('compile logical or with object filters', async () => {
+      await db
+        .query(accounts)
+        .where(or({ status: 'enabled' }, { email: 'admin@example.com' }))
+        .all()
+
+      let compiled = compileSqliteOperation(statements[0])
+      assert.deepEqual(compiled, {
+        text: 'select * from "accounts" where ((("status" = ?)) or (("email" = ?)))',
+        values: ['enabled', 'admin@example.com'],
+      })
+    })
+
     it('compile nested predicates', async () => {
       await db
         .query(accounts)
@@ -383,6 +396,27 @@ describe('sqlite sql-compiler', () => {
       assert.deepEqual(compiled, {
         text: 'select * from "accounts" limit ? offset ?',
         values: [10, 5],
+      })
+    })
+
+    it('compile ordering', async () => {
+      await db.query(accounts).orderBy('email', 'asc').orderBy('id', 'desc').all()
+      let compiled = compileSqliteOperation(statements[0])
+      assert.deepEqual(compiled, {
+        text: 'select * from "accounts" order by "email" ASC, "id" DESC',
+        values: [],
+      })
+    })
+
+    it('reject invalid order by directions', async () => {
+      await db
+        .query(accounts)
+        .orderBy('id', 'ascending' as 'asc')
+        .all()
+
+      assert.throws(() => compileSqliteOperation(statements[0]), {
+        name: 'TypeError',
+        message: 'Invalid order by direction: expected "asc" or "desc"',
       })
     })
 
@@ -570,7 +604,7 @@ describe('sqlite sql-compiler', () => {
       let compiled = compileSqliteOperation(statements[0])
       assert.deepEqual(compiled, {
         text: 'insert into "accounts" ("status", "email") values (?, ?) on conflict ("id") do update set "email" = ?',
-        values: ['contact@remix.run', 'enabled', 'info@remix.run'],
+        values: ['enabled', 'info@remix.run', 'contact@remix.run'],
       })
     })
 

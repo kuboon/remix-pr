@@ -32,17 +32,21 @@ export interface Handle<Props = Record<string, never>, ContextValue = NoContext>
 
   /**
    * Schedules an update for the component to render again. Returns a promise
-   * that resolves with an AbortSignal after the update completes. The signal
-   * is aborted when the component re-renders or is removed.
+   * that resolves with an AbortSignal after the update completes. Call this
+   * from an event handler, queued task, or other work that runs after the
+   * component commits. The signal is aborted when the component re-renders or
+   * is removed. Calling this during setup warns and skips the extra render;
+   * the promise resolves after the initial commit.
    *
    * @returns A promise that resolves with an AbortSignal after the update
+   * @throws If called during rendering or before the initial commit outside setup
    */
   update(): Promise<AbortSignal>
 
   /**
    * Schedules a task to run after the next update.
    *
-   * @param task
+   * @param task Work receiving a signal aborted on the next render or component removal.
    */
   queueTask(task: Task): void
 
@@ -59,6 +63,12 @@ export interface Handle<Props = Record<string, never>, ContextValue = NoContext>
      * The root frame for the current runtime tree.
      */
     readonly top: FrameHandle
+    /**
+     * Finds a mounted frame by name.
+     *
+     * @param name The `name` prop of the frame to find.
+     * @returns The named frame, or `undefined` when it is not mounted.
+     */
     get(name: string): FrameHandle | undefined
   }
 
@@ -127,16 +137,35 @@ export type ContextFrom<ComponentType> =
  * while different component types remain independent.
  */
 export interface Context<C> {
-  /** Replaces the current context value for this component instance. */
+  /**
+   * Replaces this component's provided value without scheduling a render.
+   * Call `handle.update()` when descendants should render with the new value.
+   *
+   * @param values Value to provide to descendants.
+   */
   set(values: C): void
-  /** Reads the context value from the nearest ancestor instance of the given component type. */
+  /**
+   * Reads the nearest ancestor instance of the given component type.
+   * Read during render to observe replacement values on later renders.
+   *
+   * @param component Provider component whose identity selects the context.
+   * @returns The provider's current value. At runtime, a missing provider returns `undefined`.
+   */
   get<ComponentType>(component: ComponentType): ContextFrom<ComponentType>
-  /** Reads an unknown context value for an untyped lookup. */
+  /**
+   * Reads context without an inferred provider value type.
+   *
+   * @param component Provider component identity.
+   * @returns The provider's current value, or `undefined` when no matching provider exists.
+   */
   get(component: ElementType | symbol): unknown | undefined
 }
 
 /**
  * Content that can be rendered into a frame.
+ *
+ * HTML strings and streams must contain trusted application content. Remix does not sanitize them
+ * before parsing and reconciling them into the current document.
  */
 export type FrameContent = ReadableStream<Uint8Array> | string | RemixNode
 
@@ -144,8 +173,9 @@ export type FrameContent = ReadableStream<Uint8Array> | string | RemixNode
  * Value returned by a browser frame resolver.
  *
  * Response bodies are rendered as frame content regardless of status. The default browser resolver
- * rejects non-OK responses before returning them. When `fetch()` followed a redirect, the response's
- * final URL updates the frame source and browser URL for a top-frame navigation.
+ * accepts 2xx responses and 3xx or 4xx HTML responses. It rejects other 3xx or 4xx responses and all
+ * 5xx responses. When `fetch()` followed a redirect, the response's final URL updates the frame source
+ * and browser URL for a top-frame navigation.
  */
 export type FrameResolution = FrameContent | Response
 
@@ -153,7 +183,9 @@ export type FrameResolution = FrameContent | Response
  * Events emitted by frame handles during reloads.
  */
 export type FrameHandleEventMap = {
+  /** A direct reload or an ancestor-driven reload has started. */
   reloadStart: Event
+  /** Reload processing has ended, including cancellation or failure. */
   reloadComplete: Event
 }
 
@@ -161,10 +193,25 @@ export type FrameHandleEventMap = {
  * Public API for interacting with a frame instance.
  */
 export type FrameHandle = TypedEventTarget<FrameHandleEventMap> & {
+  /** Source used by the next reload. Assigning it alone does not load content or change history. */
   src: string
+  /**
+   * Resolves the current source and reconciles the frame with its returned content.
+   * A newer reload cancels earlier reload work. Non-cancellation errors reject the promise.
+   *
+   * @returns The reload's signal, which is aborted if that reload is superseded or disposed.
+   */
   reload(): Promise<AbortSignal>
+  /**
+   * Renders supplied trusted content directly without calling the resolver or changing the source.
+   * HTML strings and streams are not sanitized.
+   * This does not emit reload lifecycle events or change browser history.
+   *
+   * @param content HTML, a byte stream, or a Remix node to render into the frame.
+   * @returns A promise that resolves when rendering the supplied content completes.
+   */
   replace(content: FrameContent): Promise<void>
-  // Internal runtime context used by client-rendered Frame reconciliation.
+  /** Internal runtime context used by client-rendered frame reconciliation. */
   $runtime?: unknown
 }
 
@@ -272,6 +319,7 @@ class ComponentRuntime<C = NoContext> implements ComponentHandle<C> {
   #renderController: AbortController | undefined
   #renderFn: RenderFn | undefined
   #removed = false
+  #phase: 'idle' | 'setup' | 'render' = 'idle'
   // The schedule target is stored as fields (updated each render) rather than
   // a closure so re-renders don't allocate a new function per component.
   #updateQueue: UpdateQueue | undefined
@@ -306,7 +354,13 @@ class ComponentRuntime<C = NoContext> implements ComponentHandle<C> {
 
     if (renderFn === undefined) {
       let initialize = this.#config.type as unknown as (handle: Handle<ElementProps, C>) => unknown
-      let result = initialize(this.#handle)
+      let result: unknown
+      this.#phase = 'setup'
+      try {
+        result = initialize(this.#handle)
+      } finally {
+        this.#phase = 'idle'
+      }
 
       if (!isRenderFn(result)) {
         let name = this.#config.type.name || 'Anonymous'
@@ -317,7 +371,15 @@ class ComponentRuntime<C = NoContext> implements ComponentHandle<C> {
       this.#renderFn = renderFn
     }
 
-    return [renderFn(), this.#dequeueTasks()]
+    let element: RemixNode
+    this.#phase = 'render'
+    try {
+      element = renderFn()
+    } finally {
+      this.#phase = 'idle'
+    }
+
+    return [element, this.#dequeueTasks()]
   }
 
   remove = (): Array<() => void> => {
@@ -352,16 +414,34 @@ class ComponentRuntime<C = NoContext> implements ComponentHandle<C> {
     return {
       id: this.#config.id,
       props: this.#props,
-      update: () =>
-        new Promise((resolve) => {
-          if (component.#removed) {
-            resolve(AbortSignal.abort())
-            return
-          }
+      update: () => {
+        if (component.#removed) return Promise.resolve(AbortSignal.abort())
 
+        let name = component.#config.type.name || 'Anonymous'
+        if (component.#phase === 'setup') {
+          console.warn(
+            `Ignored handle.update() while ${name} is running its setup function. The initial render includes setup changes.`,
+          )
+          return new Promise((resolve) => {
+            this.#tasks.push((signal) => resolve(signal))
+          })
+        }
+        if (component.#phase !== 'idle') {
+          throw new Error(
+            `Cannot call handle.update() while ${name} is running its ${component.#phase} function. Call it from an event handler or handle.queueTask() instead.`,
+          )
+        }
+        if (component.#updateQueue === undefined) {
+          throw new Error(
+            `Cannot call handle.update() before ${name}'s initial render commits. Call it from an event handler or handle.queueTask() instead.`,
+          )
+        }
+
+        return new Promise((resolve) => {
           this.#tasks.push((signal) => resolve(signal))
           this.#scheduleUpdate()
-        }),
+        })
+      },
       queueTask: (task: Task) => {
         this.#tasks.push(task)
       },

@@ -15,7 +15,7 @@ The guides are the hand-authored docs: Start Here, Core App Structure, Server Ru
 - `app/actions/docs/examples/` — frame handlers used by chapters. Each chapter group's `public/` directory contains its browser-hydrated demo modules and their local dependencies.
 - `app/actions/public/` — root-owned browser entrypoint, development refresh module, and stylesheets.
 - `app/assets.ts` — the source asset server and root entry hrefs/preloads, configured around colocated `public/` directories.
-- `app/middleware/render.ts` — the request-scoped `render()` helper and frame resolver.
+- `app/router.ts` — installs the standard `render()` middleware with the asset server.
 - `app/routes.ts` and `app/router.ts` — the typed route contract and controller wiring.
 - `app/ui/` — shared UI used across routes.
 - `public/` — guides-only static files served as-is by the static middleware. Shared docs assets live in `../shared/assets/`.
@@ -43,6 +43,8 @@ An optional chapter introduction can go here.
 ## Stable custom anchor {#custom-anchor}
 ```
 
+Chapters are published by default. For an unfinished chapter, keep it published with a note explaining its status and links to the relevant package READMEs. Link to the GitHub README URLs: the installed `remix` copy rewrites those links to its local README mirrors. Set `published: false` only for chapters that should not be publicly accessible, such as development fixtures. The production guide index and sidebar list unpublished chapters as disabled, and links to them render as plain text. Set `listed: false` for fixtures and other pages outside the guide sequence. The `remix` package copies only published chapters. The prerender seeds the crawler with published chapter URLs, so unpublished chapters are not written to the deployed site or added to Pagefind.
+
 Code fences support filename headers and line highlighting:
 
 ````md
@@ -65,21 +67,21 @@ export async function createProject(request: Request) {
 Use a frame directive in Markdown:
 
 ```md
-::frame{src="/examples/17-markdown-style-demo/counter/"}
+::frame{src="/examples/16-markdown-style-demo/counter/"}
 ```
 
-The examples controller maps `/examples/:chapter/:example/` to `app/actions/docs/examples/<chapter>/<example>.tsx` and dynamically imports the module, so no route changes are needed. The validator requires the `:chapter` segment to match the chapter directory name (e.g. `17-markdown-style-demo`) so examples stay scoped to the chapter that references them. Example directories are prefixed with the chapter order number to match the chapter file name.
+The examples controller maps `/examples/:chapter/:example/` to `app/actions/docs/examples/<chapter>/<example>.tsx` and dynamically imports the module, so no route changes are needed. The validator requires the `:chapter` segment to match the chapter directory name (e.g. `16-markdown-style-demo`) so examples stay scoped to the chapter that references them. Example directories are prefixed with the chapter order number to match the chapter file name.
 
 At render time, `markdown.tsx` turns the directive into `<Frame src="..." />`. The render middleware resolves that frame by doing an internal `router.fetch()` for the frame URL, so examples are normal Remix routes that return normal `Response` objects.
 
 ### Demos with code
 
-A "demo with code" shows a live, hydrated component next to its own highlighted source. It takes three co-located files:
+A "demo with code" shows a live, hydrated component next to its own highlighted source. It takes three co-located files. The unpublished Markdown style fixture below uses `.dev.` in its browser module name because production public-module discovery skips `.dev.` assets; regular chapter demos use `.demo.tsx`.
 
-1. **The demo code** — a `.demo.tsx` module inside the frame handler's `public/` directory that exports the component as a named export whose name matches the function name:
+1. **The demo code** — a demo module inside the frame handler's `public/` directory that exports the component as a named export whose name matches the function name:
 
    ```txt
-   app/actions/docs/examples/17-markdown-style-demo/public/counter.demo.tsx
+   app/actions/docs/examples/16-markdown-style-demo/public/counter.demo.dev.tsx
    ```
 
    ```tsx
@@ -109,14 +111,14 @@ A "demo with code" shows a live, hydrated component next to its own highlighted 
 2. **The frame handler** — a `<example>.tsx` module that exports a `handler` built with `demoWithCode`, pointing at the demo module and its component:
 
    ```txt
-   app/actions/docs/examples/17-markdown-style-demo/counter.tsx
+   app/actions/docs/examples/16-markdown-style-demo/counter.tsx
    ```
 
    ```tsx
    import { demoWithCode } from '../demo-with-code.tsx'
-   import { Counter } from './public/counter.demo.tsx'
+   import { Counter } from './public/counter.demo.dev.tsx'
 
-   let demoUrl = new URL('./public/counter.demo.tsx', import.meta.url)
+   let demoUrl = new URL('./public/counter.demo.dev.tsx', import.meta.url)
 
    export const handler = demoWithCode(demoUrl, Counter)
    ```

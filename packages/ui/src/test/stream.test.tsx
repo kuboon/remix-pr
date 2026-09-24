@@ -1,10 +1,10 @@
 import { expect } from '@remix-run/assert'
 import { describe, it } from '@remix-run/test'
 import type { Handle, RemixNode } from '../runtime/component.ts'
-import { createMixin, css, on } from '../index.ts'
+import { createMixin, css, on, unsafeHTML } from '../index.ts'
 import { createElement } from '../runtime/create-element.ts'
 
-import { renderToStream, renderToString } from '../server/stream.ts'
+import { ImportMap, renderToStream, renderToString } from '../server/stream.ts'
 import { clientEntry } from '../runtime/client-entries.ts'
 import { drain, readChunks, withResolvers } from './utils.ts'
 import { Frame } from '../runtime/component.ts'
@@ -12,7 +12,9 @@ import { invariant } from '../runtime/invariant.ts'
 
 const rmxDataScriptSelector = 'script[type="application/json"]#rmx-data'
 const flushMarkerPattern = /<!--\s*rmx:flush\s+(?:document|fragment)\s*-->/g
-const managedModulePreloadPattern = /<link data-rmx rel="modulepreload"/g
+const managedModulePreloadPattern = /<link data-rmx-module-preload rel="modulepreload"/g
+const blockedJavaScriptUrl =
+  "javascript:throw new Error('Remix has blocked a javascript: URL as a security precaution.')"
 
 describe('stream', () => {
   function getLatestRmxDataScript(root: ParentNode): HTMLScriptElement {
@@ -88,6 +90,86 @@ describe('stream', () => {
       let stream = renderToStream(<div>{'<script>alert(1)</script>'}</div>)
       let html = await drain(stream)
       expect(html).toBe('<div>&lt;script&gt;alert(1)&lt;/script&gt;</div>')
+    })
+
+    it('renders script string children as raw text', async () => {
+      let script = 'if (value < 10 && value > 0) console.log("in range")'
+      let html = await drain(renderToStream(<script>{script}</script>))
+
+      expect(html).toBe(`<script>${script}</script>`)
+    })
+
+    it('renders empty script elements', async (t) => {
+      let errorSpy = t.mock.method(console, 'error', () => {})
+      let html = await drain(renderToStream(<script />))
+
+      expect(html).toBe('<script></script>')
+      expect(errorSpy).not.toHaveBeenCalled()
+    })
+
+    it('prevents script string children from terminating the element', async () => {
+      let importMap = {
+        imports: {
+          example: '/example.js?before=a&after=</ScRiPt><script>alert(1)</script>',
+        },
+      }
+      let html = await drain(
+        renderToStream(<script type="importmap">{JSON.stringify(importMap)}</script>),
+      )
+
+      expect(html).toBe(
+        '<script type="importmap">' +
+          '{"imports":{"example":"/example.js?before=a&after=</\\u0053cRiPt><\\u0073cript>alert(1)</\\u0073cript>"}}' +
+          '</script>',
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let scripts = shelf.content.querySelectorAll('script')
+      expect(scripts).toHaveLength(1)
+      expect(JSON.parse(scripts[0]!.textContent!)).toEqual(importMap)
+    })
+
+    it('escapes script prefixes conservatively while preserving non-matching text', async () => {
+      let script =
+        'prescription pre<scription pre<Scription pre</scRipTion pre</ScripTion </ script> </script><script><!-- <script> -->'
+      let html = await drain(renderToStream(<script>{script}</script>))
+
+      expect(html).toBe(
+        '<script>' +
+          'prescription pre<\\u0073cription pre<\\u0053cription pre</\\u0073cRipTion pre</\\u0053cripTion ' +
+          '</ script> </\\u0073cript><\\u0073cript><!-- <\\u0073cript> -->' +
+          '</script>',
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let scripts = shelf.content.querySelectorAll('script')
+      expect(scripts).toHaveLength(1)
+    })
+
+    it('renders SVG script string children as raw text', async () => {
+      let script = 'if (value < 10 && value > 0) console.log("in range")'
+      let html = await drain(
+        renderToStream(
+          <svg>
+            <script>{script}</script>
+          </svg>,
+        ),
+      )
+
+      expect(html).toBe(`<svg><script>${script}</script></svg>`)
+    })
+
+    it('warns and ignores non-string script children', async (t) => {
+      let errorSpy = t.mock.method(console, 'error', () => {})
+      let html = await drain(renderToStream(<script>{['one', 'two']}</script>))
+
+      expect(html).toBe('<script></script>')
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      let error = errorSpy.mock.calls[0]?.arguments[0]
+      invariant(error instanceof Error)
+      expect(error.message).toBe('script elements with children must have a single string child')
     })
 
     it('renders textarea defaultValue as escaped text content', async () => {
@@ -330,13 +412,164 @@ describe('stream', () => {
       let stream = renderToStream(
         <div>
           <h1>Title</h1>
-          <div innerHTML={htmlContent} />
+          <div innerHTML={unsafeHTML(htmlContent)} />
           <p>After innerHTML</p>
         </div>,
       )
       let html = await drain(stream)
       expect(html).toBe(
         '<div><h1>Title</h1><div><strong>Bold text</strong> and <em>italic text</em></div><p>After innerHTML</p></div>',
+      )
+    })
+
+    it('rejects unbranded innerHTML values', async () => {
+      let stream = renderToStream(
+        createElement('div', {
+          innerHTML: '<img src="invalid" onerror="alert(1)">',
+        }),
+      )
+
+      await expect(drain(stream)).rejects.toThrow('Invalid innerHTML prop')
+    })
+
+    it('rejects JSON-shaped innerHTML values', async () => {
+      let stream = renderToStream(
+        createElement('div', {
+          innerHTML: { value: '<img src="invalid" onerror="alert(1)">' },
+        }),
+      )
+
+      await expect(drain(stream)).rejects.toThrow('Invalid innerHTML prop')
+    })
+
+    it('renders branded iframe srcDoc as escaped attribute markup', async () => {
+      let html = await drain(
+        renderToStream(<iframe srcDoc={unsafeHTML('<p class="message">HTML & text</p>')} />),
+      )
+
+      expect(html).toBe(
+        '<iframe srcdoc="&lt;p class=&quot;message&quot;&gt;HTML &amp; text&lt;/p&gt;"></iframe>',
+      )
+    })
+
+    it('renders branded iframe srcdoc as escaped attribute markup', async () => {
+      let html = await drain(renderToStream(<iframe srcdoc={unsafeHTML('<p>HTML</p>')} />))
+
+      expect(html).toBe('<iframe srcdoc="&lt;p&gt;HTML&lt;/p&gt;"></iframe>')
+    })
+
+    it('rejects unbranded iframe srcDoc values', async () => {
+      let stream = renderToStream(createElement('iframe', { srcDoc: '<p>HTML</p>' }))
+
+      await expect(drain(stream)).rejects.toThrow('Invalid srcDoc prop')
+    })
+
+    it('rejects JSON-shaped iframe srcDoc values', async () => {
+      let stream = renderToStream(createElement('iframe', { srcDoc: { value: '<p>HTML</p>' } }))
+
+      await expect(drain(stream)).rejects.toThrow('Invalid srcDoc prop')
+    })
+
+    it('rejects unbranded iframe srcdoc values', async () => {
+      let stream = renderToStream(createElement('iframe', { srcdoc: '<p>HTML</p>' }))
+
+      await expect(drain(stream)).rejects.toThrow('Invalid srcdoc prop')
+    })
+
+    it('rejects JSON-shaped iframe srcdoc values', async () => {
+      let stream = renderToStream(createElement('iframe', { srcdoc: { value: '<p>HTML</p>' } }))
+
+      await expect(drain(stream)).rejects.toThrow('Invalid srcdoc prop')
+    })
+
+    it('rejects outerHTML values', async () => {
+      let stream = renderToStream(createElement('div', { outerHTML: '<p>replacement</p>' }))
+
+      await expect(drain(stream)).rejects.toThrow('Invalid outerHTML prop')
+    })
+
+    it('omits invalid and reserved host prop names', async () => {
+      let html = await drain(
+        renderToStream(
+          createElement('div', {
+            'data-value': 'ok',
+            'aria-label': 'Example',
+            'x onclick="alert(1)': 'value',
+            onclick: 'alert(1)',
+          }),
+        ),
+      )
+
+      expect(html).toBe('<div data-value="ok" aria-label="Example"></div>')
+    })
+
+    it('blocks javascript URLs in executable URL attributes', async () => {
+      let html = await drain(
+        renderToStream(
+          <>
+            <a id="link" href="javascript:alert(1)" />
+            <img id="image" alt="" src={'\u0000 \tJ\na\rv\ta\ns\rc\tr\ni\tp\tt:alert(1)'} />
+            <form id="form" action="javascript:alert(1)" />
+            {createElement('button', { id: 'button', formaction: 'javascript:alert(1)' })}
+            <svg>{createElement('use', { id: 'use', 'xlink:href': 'javascript:alert(1)' })}</svg>
+            <object id="object" data="javascript:alert(1)" />
+          </>,
+        ),
+      )
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+
+      expect(shelf.content.querySelector('#link')?.getAttribute('href')).toBe(blockedJavaScriptUrl)
+      expect(shelf.content.querySelector('#image')?.getAttribute('src')).toBe(blockedJavaScriptUrl)
+      expect(shelf.content.querySelector('#form')?.getAttribute('action')).toBe(
+        blockedJavaScriptUrl,
+      )
+      expect(shelf.content.querySelector('#button')?.getAttribute('formaction')).toBe(
+        blockedJavaScriptUrl,
+      )
+      expect(shelf.content.querySelector('#use')?.getAttribute('xlink:href')).toBe(
+        blockedJavaScriptUrl,
+      )
+      expect(shelf.content.querySelector('#object')?.getAttribute('data')).toBe(
+        blockedJavaScriptUrl,
+      )
+    })
+
+    it('preserves allowed URLs and non-executable URL attributes', async () => {
+      let html = await drain(
+        renderToStream(
+          <>
+            <a id="relative" href="/docs" />
+            <a id="mailto" href="mailto:test@example.com" />
+            <a id="blob" href="blob:https://example.com/id" />
+            <img id="data-url" alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP" />
+            <img id="srcset" alt="" srcSet="javascript:alert(1) 1x" />
+            <video id="poster" poster="javascript:alert(1)" />
+            {createElement('div', { id: 'ordinary-data', data: 'javascript:alert(1)' })}
+          </>,
+        ),
+      )
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+
+      expect(shelf.content.querySelector('#relative')?.getAttribute('href')).toBe('/docs')
+      expect(shelf.content.querySelector('#mailto')?.getAttribute('href')).toBe(
+        'mailto:test@example.com',
+      )
+      expect(shelf.content.querySelector('#blob')?.getAttribute('href')).toBe(
+        'blob:https://example.com/id',
+      )
+      expect(shelf.content.querySelector('#data-url')?.getAttribute('src')).toBe(
+        'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP',
+      )
+      expect(shelf.content.querySelector('#srcset')?.getAttribute('srcset')).toBe(
+        'javascript:alert(1) 1x',
+      )
+      expect(shelf.content.querySelector('#poster')?.getAttribute('poster')).toBe(
+        'javascript:alert(1)',
+      )
+      expect(shelf.content.querySelector('#ordinary-data')?.getAttribute('data')).toBe(
+        'javascript:alert(1)',
       )
     })
 
@@ -513,19 +746,23 @@ describe('stream', () => {
       expect(html).toBe('<div data-mixed="created">child</div>')
     })
 
-    it('strips children and innerHTML before passing props to SSR mixins', async () => {
+    it('strips children and raw HTML props before passing props to SSR mixins', async () => {
       let seenProps: Array<Record<string, unknown>> = []
       let inspect = createMixin((_handle) => (props: Record<string, unknown>) => {
         seenProps.push(props)
       })
 
       await drain(renderToStream(<div mix={[inspect()]}>child</div>))
-      await drain(renderToStream(<div innerHTML="<strong>html</strong>" mix={[inspect()]} />))
+      await drain(
+        renderToStream(<div innerHTML={unsafeHTML('<strong>html</strong>')} mix={[inspect()]} />),
+      )
+      await drain(renderToStream(<iframe srcdoc={unsafeHTML('<p>html</p>')} mix={[inspect()]} />))
 
       expect('children' in seenProps[0]!).toBe(false)
       expect('innerHTML' in seenProps[0]!).toBe(false)
       expect('children' in seenProps[1]!).toBe(false)
       expect('innerHTML' in seenProps[1]!).toBe(false)
+      expect('srcdoc' in seenProps[2]!).toBe(false)
     })
 
     it('ignores children returned from mixins during SSR', async (t) => {
@@ -546,7 +783,7 @@ describe('stream', () => {
 
     it('ignores innerHTML returned from mixins during SSR', async (t) => {
       let withInnerHtml = createMixin((_handle) => () => (
-        <div data-mode="innerHTML" innerHTML="<strong>blocked</strong>" />
+        <div data-mode="innerHTML" innerHTML={unsafeHTML('<strong>blocked</strong>')} />
       ))
 
       let errorSpy = t.mock.method(console, 'error', () => {})
@@ -556,7 +793,27 @@ describe('stream', () => {
       expect(errorSpy).toHaveBeenCalledTimes(1)
       let error = errorSpy.mock.calls[0]?.arguments[0]
       invariant(error instanceof Error)
-      expect(error.message).toBe('mixins must not return children or innerHTML')
+      expect(error.message).toBe('mixins must not return children or raw HTML props')
+    })
+
+    it('ignores iframe document and outerHTML props returned from SSR mixins', async (t) => {
+      let withRawHtml = createMixin(
+        (_handle) => () =>
+          createElement('iframe', {
+            srcDoc: '<p>camel</p>',
+            srcdoc: '<p>lowercase</p>',
+            outerHTML: '<p>replacement</p>',
+          }),
+      )
+
+      let errorSpy = t.mock.method(console, 'error', () => {})
+      let html = await drain(renderToStream(<iframe mix={[withRawHtml()]} />))
+
+      expect(html).toBe('<iframe></iframe>')
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      let error = errorSpy.mock.calls[0]?.arguments[0]
+      invariant(error instanceof Error)
+      expect(error.message).toBe('mixins must not return children or raw HTML props')
     })
 
     it('supports mixins returning nested descriptors directly during SSR', async () => {
@@ -665,7 +922,7 @@ describe('stream', () => {
       )
       let html = await drain(stream)
 
-      expect(html).toContain('<style data-rmx=')
+      expect(html).toContain('<style data-rmx-style=')
       expect(html).toMatch(/class="base rmxc-[a-z0-9]+ rmxc-[a-z0-9]+"/)
       expect(html).toContain('.rmxc-')
     })
@@ -676,8 +933,11 @@ describe('stream', () => {
       )
 
       expect(html).not.toContain('</style><script>')
-      expect(html).not.toContain('<script>globalThis.__xss = true</script>')
-      expect(html).toContain('color: \\3C /style>\\3C script>globalThis.__xss = true\\3C /script>')
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      expect(shelf.content.querySelectorAll('script')).toHaveLength(0)
+      expect(html).toContain('\\3C/style><script>globalThis.__xss = true</script><style>')
     })
   })
 
@@ -768,7 +1028,7 @@ describe('stream', () => {
       let html = await drain(stream)
 
       // Should have a style tag in head
-      expect(html).toContain('<style data-rmx=')
+      expect(html).toContain('<style data-rmx-style=')
       expect(html).toContain('.rmxc-')
       expect(html).toContain('color: red')
       expect(html).toContain('font-size: 16px')
@@ -874,7 +1134,7 @@ describe('stream', () => {
 
       expect(html).toContain('<template')
       // One tag in the outer frame's template, one in the inner frame's.
-      let tags = html.match(/data-rmx="[^"]+"/g) ?? []
+      let tags = html.match(/data-rmx-style="[^"]+"/g) ?? []
       expect(tags).toHaveLength(2)
       expect(new Set(tags).size).toBe(1)
     })
@@ -890,7 +1150,7 @@ describe('stream', () => {
       let html = await drain(stream)
 
       // Style should be in the head section
-      expect(html).toContain('<html><head><style data-rmx=')
+      expect(html).toContain('<html><head><style data-rmx-style=')
       expect(html).toContain('color: purple')
       expect(html).toContain('</style></head><body>')
     })
@@ -900,7 +1160,7 @@ describe('stream', () => {
       let html = await drain(stream)
 
       // Style should be in a head element
-      expect(html).toMatch(/^<head><style data-rmx=/)
+      expect(html).toMatch(/^<head><style data-rmx-style=/)
       expect(html).toContain('color: orange')
       expect(html).toMatch(/<\/style><\/head><div class="rmxc-[a-z0-9]+">No HTML root<\/div>$/)
     })
@@ -991,6 +1251,22 @@ describe('stream', () => {
       expect(html).toContain('font-size: 16px')
     })
 
+    it('preserves range media query operators in css mixin', async () => {
+      let html = await renderToString(
+        <div
+          mix={[
+            css({
+              '@media (width < 900px)': {
+                display: 'none',
+              },
+            }),
+          ]}
+        />,
+      )
+
+      expect(html).toContain('@media (width < 900px)')
+    })
+
     it('merges styles with existing head content', async () => {
       let stream = renderToStream(
         <html>
@@ -1007,7 +1283,7 @@ describe('stream', () => {
 
       // Styles should be injected into existing head, preserving other content
       expect(html).toContain('<head>')
-      expect(html).toContain('<style data-rmx=')
+      expect(html).toContain('<style data-rmx-style=')
       expect(html).toContain('font-weight: bold')
       expect(html).toContain('<title>Page Title</title>')
       expect(html).toContain('<meta charset="utf-8" />')
@@ -1017,7 +1293,7 @@ describe('stream', () => {
       let headMatch = html.match(/<head>(.*?)<\/head>/s)
       expect(headMatch).toBeTruthy()
       let headContent = headMatch![1]
-      expect(headContent).toContain('<style data-rmx=')
+      expect(headContent).toContain('<style data-rmx-style=')
       expect(headContent).toContain('<title>Page Title</title>')
       expect(headContent).toContain('<meta charset="utf-8" />')
     })
@@ -1054,7 +1330,9 @@ describe('stream', () => {
 
       expect(html.match(/href="\/assets\/island\.js"/g)).toHaveLength(1)
       expect(html.match(/href="\/assets\/shared\.js"/g)).toHaveLength(1)
-      expect(html).toContain('<link data-rmx rel="modulepreload" href="/assets/island.js" />')
+      expect(html).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" />',
+      )
       expect(html).not.toContain('"preloads"')
     })
 
@@ -1085,7 +1363,7 @@ describe('stream', () => {
       expect(html.match(managedModulePreloadPattern)).toHaveLength(1)
     })
 
-    it('groups fragment preloads and styles in a leading transport head', async () => {
+    it('orders fragment import maps and preloads before styles', async () => {
       let html = await drain(
         renderToStream(
           <main mix={[css({ color: 'purple' })]}>
@@ -1097,6 +1375,9 @@ describe('stream', () => {
                 href: '/assets/island.js',
                 exportName: 'Island',
                 preloads: ['/assets/island.js'],
+                importMap: {
+                  imports: { '/assets/island.js': '/assets/island.hash.js' },
+                },
               }
             },
           },
@@ -1104,9 +1385,8 @@ describe('stream', () => {
       )
 
       expect(html).toMatch(
-        /^<head><link data-rmx rel="modulepreload" href="\/assets\/island\.js" \/><style data-rmx=/,
+        /^<head><script data-rmx-import-map type="importmap">.*<\/script><link data-rmx-module-preload rel="modulepreload" href="\/assets\/island\.js" \/><style data-rmx-style=.*<\/style><\/head><main class="rmxc-[a-z0-9]+">/s,
       )
-      expect(html).toMatch(/<\/style><\/head><main class="rmxc-[a-z0-9]+">/)
     })
 
     it('hoists module preloads from blocking frames', async () => {
@@ -1137,7 +1417,9 @@ describe('stream', () => {
       )
 
       let head = html.match(/<head>(.*?)<\/head>/s)?.[1]
-      expect(head).toContain('<link data-rmx rel="modulepreload" href="/assets/island.js" />')
+      expect(head).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" />',
+      )
       expect(html.match(managedModulePreloadPattern)).toHaveLength(1)
     })
 
@@ -1164,6 +1446,9 @@ describe('stream', () => {
                       href: '/assets/island.js',
                       exportName: 'Island',
                       preloads: ['/assets/island.js'],
+                      importMap: {
+                        imports: { '/assets/island.js': '/assets/island.hash.js' },
+                      },
                     }
                   },
                 },
@@ -1173,13 +1458,21 @@ describe('stream', () => {
         ),
       )
 
+      let documentHead = html.match(/<head>(.*?)<\/head>/s)?.[1]
+      invariant(documentHead)
+      expect(documentHead).toContain(
+        '<script data-rmx-import-map type="importmap">{"imports":{"/assets/island.js":"/assets/island.hash.js"}}</script>',
+      )
+      expect(documentHead).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" />',
+      )
       expect(html.match(managedModulePreloadPattern)).toHaveLength(1)
-      expect(html).toMatch(/<body><!-- rmx:f:[^ ]+ --><head><style data-rmx=/)
+      expect(html).toMatch(/<body><!-- rmx:f:[^ ]+ --><head><style data-rmx-style=/)
     })
 
     it('does not inspect marker-shaped markup outside the leading frame head', async () => {
       let markerShapedMarkup =
-        '<link data-rmx rel="modulepreload" href="/assets/not-a-preload.js" />'
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/not-a-preload.js" />'
       let html = await drain(
         renderToStream(
           <html>
@@ -1202,9 +1495,9 @@ describe('stream', () => {
       expect(html.match(managedModulePreloadPattern)).toHaveLength(1)
     })
 
-    it('does not inspect the leading frame head after its generated preload prefix', async () => {
+    it('does not inspect the leading frame head after its generated resource prefix', async () => {
       let markerShapedMarkup =
-        '<link data-rmx rel="modulepreload" href="/assets/not-a-preload.js" />'
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/not-a-preload.js" />'
       let html = await drain(
         renderToStream(
           <html>
@@ -1219,8 +1512,9 @@ describe('stream', () => {
             resolveFrame() {
               return [
                 '<head>',
-                '<link data-rmx rel="modulepreload" href="/assets/island.js" />',
-                '<style data-rmx="rmxc-frame">@layer rmx-ui.rmxc-frame { color: purple }</style>',
+                '<script data-rmx-import-map type="importmap">{"imports":{"island":"/assets/island.js"}}</script>',
+                '<link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" />',
+                '<style data-rmx-style="rmxc-frame">@layer rmx-ui.rmxc-frame { color: purple }</style>',
                 `<script type="text/plain">${markerShapedMarkup}</script>`,
                 '</head><main>Frame</main>',
               ].join('')
@@ -1230,8 +1524,11 @@ describe('stream', () => {
       )
 
       expect(html).toContain(
-        '<head><style data-rmx="rmxc-frame">@layer rmx-ui.rmxc-frame { color: purple }</style>' +
+        '<head><style data-rmx-style="rmxc-frame">@layer rmx-ui.rmxc-frame { color: purple }</style>' +
           `<script type="text/plain">${markerShapedMarkup}</script></head>`,
+      )
+      expect(html).toContain(
+        '<script data-rmx-import-map type="importmap">{"imports":{"island":"/assets/island.js"}}</script>',
       )
       expect(html.match(/href="\/assets\/island\.js"/g)).toHaveLength(1)
     })
@@ -1257,7 +1554,7 @@ describe('stream', () => {
       )
 
       expect(html).toContain(
-        '<html><head><link data-rmx rel="modulepreload" href="/assets/island.js" /></head><body>',
+        '<html><head><link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" /></head><body>',
       )
     })
 
@@ -1293,7 +1590,9 @@ describe('stream', () => {
       )
 
       let head = html.match(/<head>(.*?)<\/head>/s)?.[1]
-      expect(head).toContain('<link data-rmx rel="modulepreload" href="/assets/island.js" />')
+      expect(head).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" />',
+      )
       expect(html.match(managedModulePreloadPattern)).toHaveLength(1)
     })
 
@@ -1316,7 +1615,7 @@ describe('stream', () => {
 
       expect(html).toContain('<template id="f')
       expect(html).toContain(
-        '<head><link data-rmx rel="modulepreload" href="/assets/island.js" /></head>',
+        '<head><link data-rmx-module-preload rel="modulepreload" href="/assets/island.js" /></head>',
       )
     })
 
@@ -1521,7 +1820,10 @@ describe('stream', () => {
 
       let stream = renderToStream(
         <div>
-          <script type="application/ld+json" innerHTML={JSON.stringify(structuredData)} />
+          <script
+            type="application/ld+json"
+            innerHTML={unsafeHTML(JSON.stringify(structuredData))}
+          />
           <h1>Product Page</h1>
         </div>,
       )
@@ -1535,7 +1837,7 @@ describe('stream', () => {
       let stream = renderToStream(
         <div>
           <h1>Page Title</h1>
-          <script innerHTML="console.log('Hello World')" />
+          <script innerHTML={unsafeHTML("console.log('Hello World')")} />
           <p>Some content</p>
         </div>,
       )
@@ -1548,12 +1850,12 @@ describe('stream', () => {
     it('renders ld+json scripts in place when mixed with regular scripts', async () => {
       let stream = renderToStream(
         <div>
-          <script type="text/javascript" innerHTML="console.log('Regular script')" />
+          <script type="text/javascript" innerHTML={unsafeHTML("console.log('Regular script')")} />
           <script
             type="application/ld+json"
-            innerHTML='{"@context":"https://schema.org","@type":"WebPage"}'
+            innerHTML={unsafeHTML('{"@context":"https://schema.org","@type":"WebPage"}')}
           />
-          <script innerHTML="console.log('Another regular script')" />
+          <script innerHTML={unsafeHTML("console.log('Another regular script')")} />
           <h1>Mixed Scripts Page</h1>
         </div>,
       )
@@ -1929,6 +2231,967 @@ describe('stream', () => {
       })
     })
 
+    it('merges resolved client entry maps into a managed import map in place', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+      function Document() {
+        return () => (
+          <html>
+            <head>
+              <meta charSet="utf-8" />
+              <ImportMap
+                id="app-import-map"
+                nonce="nonce-value"
+                data-source="document"
+                value={{
+                  imports: {
+                    '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx',
+                  },
+                  integrity: {
+                    '/assets/app/entry.@abc123.tsx': 'sha256-entry',
+                  },
+                }}
+              />
+              <title>Counter</title>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>
+        )
+      }
+
+      let html = await drain(
+        renderToStream(<Document />, {
+          resolveClientEntry() {
+            return {
+              href: '/assets/app/components/counter.tsx',
+              exportName: 'Counter',
+              importMap: {
+                imports: {
+                  '/assets/app/components/counter.tsx':
+                    '/assets/app/components/counter.@def456.tsx',
+                },
+                scopes: {
+                  '/assets/app/components/': {
+                    pkg: '/assets/app/node_modules/pkg/index.@fedcba.ts',
+                  },
+                },
+                integrity: {
+                  '/assets/app/components/counter.@def456.tsx': 'sha256-counter',
+                },
+              },
+            }
+          },
+        }),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let script = shelf.content.querySelector<HTMLScriptElement>('#app-import-map')
+      expect(script?.nonce).toBe('nonce-value')
+      expect(script?.dataset.source).toBe('document')
+      expect(JSON.parse(script?.textContent ?? '{}')).toEqual({
+        imports: {
+          '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx',
+          '/assets/app/components/counter.tsx': '/assets/app/components/counter.@def456.tsx',
+        },
+        scopes: {
+          '/assets/app/components/': {
+            pkg: '/assets/app/node_modules/pkg/index.@fedcba.ts',
+          },
+        },
+        integrity: {
+          '/assets/app/entry.@abc123.tsx': 'sha256-entry',
+          '/assets/app/components/counter.@def456.tsx': 'sha256-counter',
+        },
+      })
+      expect(html.indexOf('<meta')).toBeLessThan(html.indexOf('id="app-import-map"'))
+      expect(html.indexOf('id="app-import-map"')).toBeLessThan(html.indexOf('<title>'))
+    })
+
+    it('rejects managed import maps outside a document head', async () => {
+      await expect(renderToString(<ImportMap value={{}} />)).rejects.toThrow(
+        'ImportMap must be rendered inside a document head',
+      )
+    })
+
+    it('rejects multiple managed import maps in one document', async () => {
+      await expect(
+        renderToString(
+          <html>
+            <head>
+              <ImportMap value={{}} />
+              <ImportMap value={{}} />
+            </head>
+          </html>,
+        ),
+      ).rejects.toThrow('Only one ImportMap can be rendered per document')
+    })
+
+    it('does not merge resolved client entry maps into authored import maps', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+      let authoredMap = { imports: { pkg: '/assets/pkg.@abc.ts' } }
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap">{JSON.stringify(authoredMap)}</script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: { imports: { added: '/assets/added.@abc.ts' } },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let scripts = shelf.content.querySelectorAll<HTMLScriptElement>('script[type="importmap"]')
+      expect(scripts).toHaveLength(2)
+      expect(JSON.parse(scripts[0]?.textContent ?? '{}')).toEqual(authoredMap)
+      expect(JSON.parse(scripts[1]?.textContent ?? '{}')).toEqual({
+        imports: { added: '/assets/added.@abc.ts' },
+      })
+    })
+
+    it('emits import maps returned from resolved client entries', async () => {
+      let Counter = clientEntry(
+        'file:///app/components/counter.tsx',
+        function ImportMapCounter(handle: Handle<{ initialCount: number }>) {
+          return () => <div>Count: {handle.props.initialCount}</div>
+        },
+      )
+
+      let html = await drain(
+        renderToStream(<Counter initialCount={42} />, {
+          resolveClientEntry() {
+            return {
+              href: '/assets/app/components/counter.tsx',
+              exportName: 'Counter',
+              importMap: {
+                imports: {
+                  '/assets/app/components/counter.tsx':
+                    '/assets/app/components/counter.@abc123.tsx',
+                  '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                },
+              },
+            }
+          },
+        }),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScript = shelf.content.querySelector('script[type="importmap"]')
+      expect(importMapScript?.textContent).toBe(
+        '{"imports":{"/assets/app/components/counter.tsx":"/assets/app/components/counter.@abc123.tsx","/assets/app/shared.ts":"/assets/app/shared.@def456.ts"}}',
+      )
+      expect(importMapScript?.hasAttribute('data-rmx-import-map')).toBe(true)
+      expect(html).toMatch(/^<head><script data-rmx-import-map type="importmap">/)
+
+      let data = parseRmxDataFromHtml(html)
+      let entries = Object.values<any>(data.h)
+      expect(entries[0]).toMatchObject({
+        moduleUrl: '/assets/app/components/counter.tsx',
+        exportName: 'Counter',
+      })
+    })
+
+    it('merges client entry import maps and dedupes overlapping entries', async () => {
+      let First = clientEntry('file:///app/first.tsx', function First() {
+        return () => <div>First</div>
+      })
+      let Second = clientEntry('file:///app/second.tsx', function Second() {
+        return () => <div>Second</div>
+      })
+      let Duplicate = clientEntry('file:///app/duplicate.tsx', function Duplicate() {
+        return () => <div>Duplicate</div>
+      })
+      let firstImportMap = {
+        imports: {
+          first: '/assets/first.hash.js',
+          shared: '/assets/shared.hash.js',
+        },
+      }
+      let secondImportMap = {
+        imports: {
+          second: '/assets/second.hash.js',
+          shared: '/assets/shared.hash.js',
+        },
+      }
+
+      let html = await drain(
+        renderToStream(
+          <>
+            <First />
+            <Second />
+            <Duplicate />
+          </>,
+          {
+            resolveClientEntry(entryId) {
+              return {
+                href: entryId,
+                exportName: 'default',
+                importMap: entryId.endsWith('/second.tsx') ? secondImportMap : firstImportMap,
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll(
+        'script[data-rmx-import-map][type="importmap"]',
+      )
+      expect(importMapScripts).toHaveLength(1)
+      expect(JSON.parse(importMapScripts[0]?.textContent ?? '{}')).toEqual({
+        imports: {
+          first: '/assets/first.hash.js',
+          shared: '/assets/shared.hash.js',
+          second: '/assets/second.hash.js',
+        },
+      })
+    })
+
+    it('rejects conflicting client entry import maps', async () => {
+      let First = clientEntry('file:///app/first.tsx', function First() {
+        return () => <div>First</div>
+      })
+      let Second = clientEntry('file:///app/second.tsx', function Second() {
+        return () => <div>Second</div>
+      })
+
+      let stream = renderToStream(
+        <>
+          <First />
+          <Second />
+        </>,
+        {
+          resolveClientEntry(entryId) {
+            return {
+              href: entryId,
+              exportName: 'default',
+              importMap: {
+                imports: {
+                  shared: entryId.endsWith('/first.tsx')
+                    ? '/assets/shared.first.js'
+                    : '/assets/shared.second.js',
+                },
+              },
+            }
+          },
+        },
+      )
+
+      await expect(drain(stream)).rejects.toThrow(
+        'Conflicting framework import map entry for "shared"',
+      )
+    })
+
+    it('rejects conflicting client entry import map integrity metadata', async () => {
+      let First = clientEntry('file:///app/first.tsx', function First() {
+        return () => <div>First</div>
+      })
+      let Second = clientEntry('file:///app/second.tsx', function Second() {
+        return () => <div>Second</div>
+      })
+
+      let stream = renderToStream(
+        <>
+          <First />
+          <Second />
+        </>,
+        {
+          resolveClientEntry(entryId) {
+            return {
+              href: entryId,
+              exportName: 'default',
+              importMap: {
+                integrity: {
+                  '/assets/shared.js': entryId.endsWith('/first.tsx')
+                    ? 'sha256-first'
+                    : 'sha256-second',
+                },
+              },
+            }
+          },
+        },
+      )
+
+      await expect(drain(stream)).rejects.toThrow(
+        'Conflicting framework import map integrity entry for "/assets/shared.js"',
+      )
+    })
+
+    it('emits preloads and import maps returned from the same resolved client entry', async () => {
+      let Counter = clientEntry(
+        'file:///app/components/counter.tsx',
+        function PreloadedImportMapCounter() {
+          return () => <div>Count</div>
+        },
+      )
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <title>Counter</title>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                preloads: [
+                  '/assets/app/components/counter.@abc123.tsx',
+                  '/assets/app/shared.@def456.ts',
+                ],
+                importMap: {
+                  imports: {
+                    '/assets/app/components/counter.tsx':
+                      '/assets/app/components/counter.@abc123.tsx',
+                    '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let head = html.match(/<head>(.*?)<\/head>/s)?.[1]
+      invariant(head)
+      expect(head).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/app/components/counter.@abc123.tsx" />',
+      )
+      expect(head).toContain(
+        '<link data-rmx-module-preload rel="modulepreload" href="/assets/app/shared.@def456.ts" />',
+      )
+      expect(head).toContain(
+        '<script data-rmx-import-map type="importmap">{"imports":{"/assets/app/components/counter.tsx":"/assets/app/components/counter.@abc123.tsx","/assets/app/shared.ts":"/assets/app/shared.@def456.ts"}}</script>',
+      )
+      expect(head.indexOf('<script data-rmx-import-map type="importmap">')).toBeLessThan(
+        head.indexOf('<link data-rmx-module-preload rel="modulepreload"'),
+      )
+    })
+
+    it('emits discovered import maps after authored document head content', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <meta name="theme-color" content="white" />
+              <link rel="stylesheet" href="/assets/app.css" />
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/app/components/counter.tsx':
+                      '/assets/app/components/counter.@abc123.tsx',
+                    '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let importMapIndex = html.indexOf('<script data-rmx-import-map type="importmap">')
+      let metaIndex = html.indexOf('<meta name="theme-color"')
+      let stylesheetIndex = html.indexOf('<link rel="stylesheet"')
+
+      expect(importMapIndex).toBeGreaterThan(html.indexOf('<head>'))
+      expect(importMapIndex).toBeGreaterThan(metaIndex)
+      expect(importMapIndex).toBeGreaterThan(stylesheetIndex)
+      expect(html).toContain('</script></head>')
+    })
+
+    it('creates a document head for discovered import maps when one is omitted', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <body>
+              <Counter />
+              <script type="module" src="/assets/app/entry.@abc123.tsx" />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/app/components/counter.tsx':
+                      '/assets/app/components/counter.@abc123.tsx',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      expect(html).toContain('<html><head><script data-rmx-import-map type="importmap">')
+      expect(html.indexOf('<script data-rmx-import-map type="importmap">')).toBeLessThan(
+        html.indexOf('<body>'),
+      )
+    })
+
+    it('leaves authored import maps in document heads before module preloads', async () => {
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <meta charSet="utf-8" />
+              <title>Import maps</title>
+              <link rel="stylesheet" href="/assets/app.css" />
+              <script type="importmap">
+                {JSON.stringify({
+                  imports: {
+                    '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx',
+                    '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                  },
+                })}
+              </script>
+              <link rel="modulepreload" href="/assets/app/shared.@def456.ts" />
+              <script type="module" src="/assets/app/entry.@abc123.tsx" />
+            </head>
+            <body>App</body>
+          </html>,
+        ),
+      )
+
+      let stylesheetIndex = html.indexOf('<link rel="stylesheet"')
+      let importMapIndex = html.indexOf('<script type="importmap">')
+      let modulePreloadIndex = html.indexOf('<link rel="modulepreload"')
+      let moduleScriptIndex = html.indexOf('<script type="module"')
+
+      expect(importMapIndex).toBeGreaterThan(stylesheetIndex)
+      expect(importMapIndex).toBeLessThan(modulePreloadIndex)
+      expect(importMapIndex).toBeLessThan(moduleScriptIndex)
+    })
+
+    it('dedupes resolved client entry import maps against authored document import maps', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap">
+                {JSON.stringify({
+                  imports: {
+                    '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx',
+                    '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                  },
+                  integrity: {
+                    '/assets/app/shared.@def456.ts': 'sha256-shared',
+                  },
+                })}
+              </script>
+              <link rel="modulepreload" href="/assets/app/shared.@def456.ts" />
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/app/shared.ts': '/assets/app/shared.@def456.ts',
+                    '/assets/app/components/counter.tsx':
+                      '/assets/app/components/counter.@def456.tsx',
+                  },
+                  scopes: {
+                    '/assets/app/components/': {
+                      pkg: '/assets/app/node_modules/pkg/index.@fedcba.ts',
+                    },
+                  },
+                  integrity: {
+                    '/assets/app/shared.@def456.ts': 'sha256-shared',
+                    '/assets/app/components/counter.@def456.tsx': 'sha256-counter',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(importMapScripts[0]?.textContent).toBe(
+        '{"imports":{"/assets/app/entry.tsx":"/assets/app/entry.@abc123.tsx","/assets/app/shared.ts":"/assets/app/shared.@def456.ts"},"integrity":{"/assets/app/shared.@def456.ts":"sha256-shared"}}',
+      )
+      expect(importMapScripts[0]?.hasAttribute('data-rmx-import-map')).toBe(false)
+      expect(importMapScripts[1]?.textContent).toBe(
+        '{"imports":{"/assets/app/components/counter.tsx":"/assets/app/components/counter.@def456.tsx"},"scopes":{"/assets/app/components/":{"pkg":"/assets/app/node_modules/pkg/index.@fedcba.ts"}},"integrity":{"/assets/app/components/counter.@def456.tsx":"sha256-counter"}}',
+      )
+      expect(importMapScripts[1]?.hasAttribute('data-rmx-import-map')).toBe(true)
+    })
+
+    it('does not dedupe against authored import maps rendered with innerHTML', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script
+                type="importmap"
+                innerHTML={unsafeHTML(
+                  JSON.stringify({
+                    imports: { pkg: '/assets/pkg.@abc.ts' },
+                  }),
+                )}
+              />
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    pkg: '/assets/pkg.@abc.ts',
+                    added: '/assets/added.@abc.ts',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(JSON.parse(importMapScripts[0]?.textContent ?? '{}')).toEqual({
+        imports: { pkg: '/assets/pkg.@abc.ts' },
+      })
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: {
+          pkg: '/assets/pkg.@abc.ts',
+          added: '/assets/added.@abc.ts',
+        },
+      })
+    })
+
+    it('does not dedupe against authored import maps with a src attribute', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap" src="/import-map.json">
+                {JSON.stringify({ imports: { pkg: '/assets/pkg.@abc.ts' } })}
+              </script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    pkg: '/assets/pkg.@abc.ts',
+                    added: '/assets/added.@abc.ts',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = Array.from(shelf.content.querySelectorAll('script')).filter(
+        (script) => script.type.toLowerCase() === 'importmap',
+      )
+      expect(importMapScripts).toHaveLength(2)
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: {
+          pkg: '/assets/pkg.@abc.ts',
+          added: '/assets/added.@abc.ts',
+        },
+      })
+    })
+
+    it('matches authored import map types case-insensitively', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="IMPORTMAP">
+                {JSON.stringify({ imports: { pkg: '/assets/pkg.@abc.ts' } })}
+              </script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    pkg: '/assets/pkg.@abc.ts',
+                    added: '/assets/added.@abc.ts',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = Array.from(shelf.content.querySelectorAll('script')).filter(
+        (script) => script.type.toLowerCase() === 'importmap',
+      )
+      expect(importMapScripts).toHaveLength(2)
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: { added: '/assets/added.@abc.ts' },
+      })
+    })
+
+    it('dedupes exact and null entries from partially invalid authored import maps', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap">
+                {JSON.stringify({
+                  imports: {
+                    '/assets/shared.ts': '/assets/shared.@abc.ts',
+                    blocked: null,
+                    invalidAddress: 'https://[',
+                    invalidType: true,
+                  },
+                  scopes: {
+                    '/assets/features/': { pkg: '/assets/pkg.@abc.ts' },
+                  },
+                })}
+              </script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/shared.ts': '/assets/shared.@abc.ts',
+                    blocked: null,
+                    invalidAddress: 'https://[',
+                    invalidType: null,
+                    added: '/assets/added.@abc.ts',
+                  },
+                  scopes: {
+                    '/assets/features/': {
+                      pkg: '/assets/pkg.@abc.ts',
+                      other: '/assets/other.@abc.ts',
+                    },
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: { added: '/assets/added.@abc.ts' },
+        scopes: {
+          '/assets/features/': { other: '/assets/other.@abc.ts' },
+        },
+      })
+    })
+
+    it('does not dedupe against authored import maps after the document head', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head />
+            <body>
+              <script type="importmap">
+                {JSON.stringify({ imports: { pkg: '/assets/pkg.@abc.ts' } })}
+              </script>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: { imports: { pkg: '/assets/pkg.@abc.ts' } },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(importMapScripts[0]?.hasAttribute('data-rmx-import-map')).toBe(true)
+      expect(importMapScripts[1]?.hasAttribute('data-rmx-import-map')).toBe(false)
+    })
+
+    it('leaves arbitrary authored import map content opaque', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap">not valid JSON</script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            frameSrc: 'https://example.com/app/page',
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    'https://example.com/app/shared.ts': 'https://example.com/app/shared.@abc.ts',
+                    blocked: null,
+                    invalidAddress: null,
+                    added: '/assets/added.@abc.ts',
+                  },
+                  scopes: {
+                    'https://example.com/app/features/': {
+                      pkg: 'https://example.com/pkg.@abc.ts',
+                      other: '/assets/other.@abc.ts',
+                    },
+                    'https://[': { ignored: '/ignored.ts' },
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(importMapScripts[0]?.textContent).toBe('not valid JSON')
+      expect(importMapScripts[0]?.hasAttribute('data-rmx-import-map')).toBe(false)
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: {
+          'https://example.com/app/shared.ts': 'https://example.com/app/shared.@abc.ts',
+          blocked: null,
+          invalidAddress: null,
+          added: '/assets/added.@abc.ts',
+        },
+        scopes: {
+          'https://example.com/app/features/': {
+            pkg: 'https://example.com/pkg.@abc.ts',
+            other: '/assets/other.@abc.ts',
+          },
+          'https://[': { ignored: '/ignored.ts' },
+        },
+      })
+    })
+
+    it('warns and ignores client entry import maps that conflict with authored maps', async (t) => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+      let warn = t.mock.method(console, 'warn', () => {})
+
+      let html = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <script type="importmap">
+                {JSON.stringify({
+                  imports: {
+                    '/assets/app/shared.ts': '/assets/app/shared.@old.ts',
+                  },
+                  integrity: {
+                    '/assets/app/shared.@old.ts': 'sha256-old',
+                  },
+                })}
+              </script>
+            </head>
+            <body>
+              <Counter />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/app/shared.ts': '/assets/app/shared.@new.ts',
+                    '/assets/app/added.ts': '/assets/app/added.@new.ts',
+                  },
+                  integrity: {
+                    '/assets/app/shared.@old.ts': 'sha256-new',
+                    '/assets/app/added.@new.ts': 'sha256-added',
+                  },
+                },
+              }
+            },
+          },
+        ),
+      )
+
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(warn.mock.calls[0]?.arguments[0]).toBe(
+        '[remix] Ignoring conflicting import map entry for "/assets/app/shared.ts": ' +
+          '"/assets/app/shared.@old.ts" is already authored, but the discovered map points to "/assets/app/shared.@new.ts"',
+      )
+      expect(warn.mock.calls[1]?.arguments[0]).toBe(
+        '[remix] Ignoring conflicting import map integrity entry for "/assets/app/shared.@old.ts": ' +
+          '"sha256-old" is already authored, but the discovered map points to "sha256-new"',
+      )
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScripts = shelf.content.querySelectorAll('script[type="importmap"]')
+      expect(importMapScripts).toHaveLength(2)
+      expect(JSON.parse(importMapScripts[1]?.textContent ?? '{}')).toEqual({
+        imports: {
+          '/assets/app/added.ts': '/assets/app/added.@new.ts',
+        },
+        integrity: {
+          '/assets/app/added.@new.ts': 'sha256-added',
+        },
+      })
+    })
+
+    it('emits scoped import maps returned from resolved client entries', async () => {
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let html = await drain(
+        renderToStream(<Counter />, {
+          resolveClientEntry() {
+            return {
+              href: '/assets/app/components/counter.tsx',
+              exportName: 'Counter',
+              importMap: {
+                imports: {
+                  '/assets/app/components/counter.tsx':
+                    '/assets/app/components/counter.@abc123.tsx',
+                },
+                scopes: {
+                  '/assets/app/components/': {
+                    pkg: '/assets/app/node_modules/pkg/index.@def456.ts',
+                  },
+                },
+              },
+            }
+          },
+        }),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = html
+      let importMapScript = shelf.content.querySelector('script[type="importmap"]')
+      expect(importMapScript?.textContent).toBe(
+        '{"imports":{"/assets/app/components/counter.tsx":"/assets/app/components/counter.@abc123.tsx"},"scopes":{"/assets/app/components/":{"pkg":"/assets/app/node_modules/pkg/index.@def456.ts"}}}',
+      )
+    })
+
     it('resolves opaque client-entry ids inside blocking frames during SSR', async () => {
       let Counter = clientEntry(
         'file:///app/components/counter.tsx',
@@ -2217,7 +3480,7 @@ describe('stream', () => {
 
       expect(result).not.toContain('<!DOCTYPE')
       expect(result).toContain('<template')
-      expect(result).toContain('<head><style data-rmx=')
+      expect(result).toContain('<head><style data-rmx-style=')
       expect(result).toContain('<div class="rmxc-')
       expect(result).toContain('>Resolved</div>')
     })
@@ -2261,6 +3524,168 @@ describe('stream', () => {
       // Should have aggregated frame metadata script
       let data = parseRmxDataFromHtml(result)
       expect(data.f[frameId].status).toBe('resolved')
+    })
+
+    it('hoists framework import maps from blocking frame heads', async () => {
+      let Outer = clientEntry('file:///app/outer.tsx', function OuterImportMapEntry() {
+        return () => <div>Outer</div>
+      })
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let result = await drain(
+        renderToStream(
+          <html>
+            <head>
+              <ImportMap
+                value={{
+                  imports: { '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx' },
+                }}
+              />
+              <title>Frame import map</title>
+            </head>
+            <body>
+              <Outer />
+              <Frame src="/x" />
+            </body>
+          </html>,
+          {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/outer.tsx',
+                exportName: 'Outer',
+                importMap: {
+                  imports: {
+                    '/assets/app/outer.tsx': '/assets/app/outer.@abc123.tsx',
+                    '/assets/app/shared.ts': '/assets/app/shared.@abc123.ts',
+                  },
+                },
+              }
+            },
+            resolveFrame: async () =>
+              drain(
+                renderToStream(
+                  <>
+                    <Counter />
+                    <div mix={css({ color: 'purple' })}>Styled frame content</div>
+                  </>,
+                  {
+                    resolveClientEntry() {
+                      return {
+                        href: '/assets/app/components/counter.tsx',
+                        exportName: 'Counter',
+                        importMap: {
+                          imports: {
+                            '/assets/app/components/counter.tsx':
+                              '/assets/app/components/counter.@abc123.tsx',
+                            '/assets/app/shared.ts': '/assets/app/shared.@abc123.ts',
+                          },
+                        },
+                      }
+                    },
+                  },
+                ),
+              ),
+          },
+        ),
+      )
+
+      let shelf = document.createElement('template')
+      shelf.innerHTML = result
+      let importMapScript = shelf.content.querySelector('script[type="importmap"]')
+      expect(JSON.parse(importMapScript?.textContent ?? '{}')).toEqual({
+        imports: {
+          '/assets/app/entry.tsx': '/assets/app/entry.@abc123.tsx',
+          '/assets/app/components/counter.tsx': '/assets/app/components/counter.@abc123.tsx',
+          '/assets/app/shared.ts': '/assets/app/shared.@abc123.ts',
+          '/assets/app/outer.tsx': '/assets/app/outer.@abc123.tsx',
+        },
+      })
+      expect(importMapScript?.hasAttribute('data-rmx-import-map')).toBe(true)
+      expect(result.match(/<script data-rmx-import-map type="importmap">/g)).toHaveLength(1)
+      expect(result.indexOf('<script data-rmx-import-map type="importmap">')).toBeLessThan(
+        result.indexOf('<body>'),
+      )
+      expect(result).toMatch(/<!-- rmx:f:[^ ]+ --><head><style data-rmx-style=/)
+      expect(result).toContain('<div>Count</div>')
+    })
+
+    it('rejects malformed framework import maps in blocking frame heads', async () => {
+      let stream = renderToStream(
+        <html>
+          <head>
+            <title>Invalid frame import map</title>
+          </head>
+          <body>
+            <Frame src="/x" />
+          </body>
+        </html>,
+        {
+          resolveFrame: () =>
+            '<head><script data-rmx-import-map type="importmap">not valid JSON</script></head>' +
+            '<main>Frame content</main>',
+        },
+      )
+
+      await expect(drain(stream)).rejects.toThrow(
+        'Invalid framework-owned import map in frame head',
+      )
+    })
+
+    it('preserves framework import maps in non-blocking frame heads', async () => {
+      let [framePromise, resolveFrame] = withResolvers<string>()
+      let Counter = clientEntry('file:///app/components/counter.tsx', function ImportMapCounter() {
+        return () => <div>Count</div>
+      })
+
+      let stream = renderToStream(
+        <html>
+          <head>
+            <title>Late frame import map</title>
+          </head>
+          <body>
+            <Frame src="/x" fallback={<div>Loading</div>} />
+          </body>
+        </html>,
+        {
+          resolveFrame: () => framePromise,
+        },
+      )
+      let chunks = readChunks(stream)
+
+      let firstChunk = await chunks.next()
+      invariant(!firstChunk.done)
+      expect(firstChunk.value).not.toContain('<script type="importmap">')
+
+      resolveFrame(
+        await drain(
+          renderToStream(<Counter />, {
+            resolveClientEntry() {
+              return {
+                href: '/assets/app/components/counter.tsx',
+                exportName: 'Counter',
+                importMap: {
+                  imports: {
+                    '/assets/app/components/counter.tsx':
+                      '/assets/app/components/counter.@abc123.tsx',
+                  },
+                },
+              }
+            },
+          }),
+        ),
+      )
+
+      let secondChunk = await chunks.next()
+      invariant(!secondChunk.done)
+      expect(secondChunk.value).toContain('<template id="f')
+      expect(secondChunk.value).toContain(
+        '<head><script data-rmx-import-map type="importmap">' +
+          '{"imports":{"/assets/app/components/counter.tsx":' +
+          '"/assets/app/components/counter.@abc123.tsx"}}' +
+          '</script></head>',
+      )
     })
 
     it('renders blocking frames without fallback', async () => {
@@ -2465,31 +3890,50 @@ describe('stream', () => {
       expect(done.done).toBe(true)
     })
 
-    it('cancels blocking frame rendering when signal aborts without calling onError', async () => {
+    it('cancels all blocking frames without unhandled rejections', async () => {
       let controller = new AbortController()
       let errors: unknown[] = []
+      let [frameOne, , rejectFrameOne] = withResolvers<string>()
+      let [frameTwo, , rejectFrameTwo] = withResolvers<string>()
+      let unhandledRejections: unknown[] = []
+      let onUnhandledRejection = (event: PromiseRejectionEvent) => {
+        event.preventDefault()
+        unhandledRejections.push(event.reason)
+      }
+      window.addEventListener('unhandledrejection', onUnhandledRejection)
 
-      let stream = renderToStream(<Frame src="/fragments/product" />, {
-        onError(error) {
-          errors.push(error)
-        },
-        resolveFrame: () =>
-          new Promise<string>((_resolve, reject) => {
-            controller.signal.addEventListener('abort', () => reject(controller.signal.reason), {
-              once: true,
-            })
-          }),
-        signal: controller.signal,
-      })
+      try {
+        let stream = renderToStream(
+          <div>
+            <Frame src="/fragments/one" />
+            <Frame src="/fragments/two" />
+          </div>,
+          {
+            onError(error) {
+              errors.push(error)
+            },
+            resolveFrame(src) {
+              return src === '/fragments/one' ? frameOne : frameTwo
+            },
+            signal: controller.signal,
+          },
+        )
 
-      let reader = stream.getReader()
-      let read = reader.read()
+        let reader = stream.getReader()
+        let read = reader.read()
 
-      let abortError = new DOMException('This operation was aborted', 'AbortError')
-      controller.abort(abortError)
+        let abortError = new DOMException('This operation was aborted', 'AbortError')
+        controller.abort(abortError)
+        rejectFrameOne(abortError)
+        rejectFrameTwo(abortError)
 
-      await expect(read).resolves.toEqual({ done: true, value: undefined })
-      expect(errors).toEqual([])
+        await expect(read).resolves.toEqual({ done: true, value: undefined })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(errors).toEqual([])
+        expect(unhandledRejections).toEqual([])
+      } finally {
+        window.removeEventListener('unhandledrejection', onUnhandledRejection)
+      }
     })
 
     it('cancels non-blocking frame rendering when signal aborts without calling onError', async () => {

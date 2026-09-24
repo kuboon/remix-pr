@@ -2,6 +2,216 @@
 
 This is the changelog for [`remix`](https://github.com/remix-run/remix/tree/main/packages/remix). It follows [semantic versioning](https://semver.org/).
 
+## v3.0.0-rc.3
+
+### Pre-release Changes
+
+- BREAKING CHANGE: `remix/data-table` now treats dotted strings passed as comparison values as scalar values. Use table column references for column-to-column comparisons.
+
+- BREAKING CHANGE: Raw HTML rendered through `remix/ui` must now be explicitly authorized with `unsafeHTML()`. This applies to `innerHTML` and both iframe `srcDoc` spellings (`srcDoc` and `srcdoc`). `outerHTML` is not supported because it would replace a reconciler-owned element. The helper preserves its input exactly and does not sanitize it.
+
+  ```diff
+  -import type { Handle } from 'remix/ui'
+  +import { unsafeHTML } from 'remix/ui'
+  +import type { Handle } from 'remix/ui'
+
+   function Content(handle: Handle<{ html: string }>) {
+  -  return () => <div innerHTML={handle.props.html} />
+  +  return () => <div innerHTML={unsafeHTML(handle.props.html)} />
+   }
+  ```
+
+- BREAKING CHANGE: `Cookie.secure` from `remix/cookie` returns `undefined` when unconfigured. Use `cookie.secure ?? false` when a boolean is required. Session middleware now defaults to `Secure` on HTTPS requests while preserving explicit cookie settings.
+
+- BREAKING CHANGE: `remix/middleware/session` now enforces configured cookie lifetimes before loading session data. Existing cookies without expiration metadata start a new session when `maxAge` or `expires` is configured. Sessions without a configured lifetime retain their existing behavior.
+
+- BREAKING CHANGE: `remix/tar-parser` now defaults to `pathPolicy: 'relative'`, rejecting invalid entry names and link targets with `TarParseError`. Entry names must be relative without parent components; symlink and hard-link targets must stay within the archive when resolved from the link's parent and archive root, respectively. Set `pathPolicy: 'preserve'` to process unrestricted decoded paths while retaining archive limits and header structure validation:
+
+  ```diff
+  -await parseTar(archive, handleEntry)
+  +await parseTar(archive, { pathPolicy: 'preserve' }, handleEntry)
+  ```
+
+  See the [tar-parser changelog](https://github.com/remix-run/remix/blob/main/packages/tar-parser/CHANGELOG.md) for details.
+
+- BREAKING CHANGE: `remix/tar-parser` now limits entry bodies to 2 MiB, total archive input to 20 MiB, and entry counts to 5,000 by default. These limits are configurable through `maxEntrySize`, `maxTotalSize`, and `maxEntries`, with an `Infinity` opt-out and named limit errors. See the [tar-parser changelog](https://github.com/remix-run/remix/blob/main/packages/tar-parser/CHANGELOG.md) for migration details.
+
+- Expose `compileOrderByDirection()` through `remix/data-table/sql-helpers`.
+
+- Ship a generated `INDEX.md` that maps app workflows to installed guides and `remix/*` imports to the most specific installed README available.
+
+- Compressed HTML from `remix/middleware/compression` now streams incrementally by default, so initial UI and Frame fallbacks can reach the browser before deferred Frames resolve. Explicit zlib and Brotli `flush` options continue to override the streaming-safe defaults.
+
+- Bumped `@remix-run/*` dependencies:
+  - [`assets@0.7.1`](https://github.com/remix-run/remix/releases/tag/assets@0.7.1)
+  - [`async-context-middleware@0.3.7`](https://github.com/remix-run/remix/releases/tag/async-context-middleware@0.3.7)
+  - [`auth@0.3.2`](https://github.com/remix-run/remix/releases/tag/auth@0.3.2)
+  - [`auth-middleware@0.2.7`](https://github.com/remix-run/remix/releases/tag/auth-middleware@0.2.7)
+  - [`cli@0.7.1`](https://github.com/remix-run/remix/releases/tag/cli@0.7.1)
+  - [`compression-middleware@0.1.15`](https://github.com/remix-run/remix/releases/tag/compression-middleware@0.1.15)
+  - [`cookie@0.7.0`](https://github.com/remix-run/remix/releases/tag/cookie@0.7.0)
+  - [`cop-middleware@0.1.10`](https://github.com/remix-run/remix/releases/tag/cop-middleware@0.1.10)
+  - [`cors-middleware@0.2.0`](https://github.com/remix-run/remix/releases/tag/cors-middleware@0.2.0)
+  - [`csrf-middleware@0.1.10`](https://github.com/remix-run/remix/releases/tag/csrf-middleware@0.1.10)
+  - [`data-schema@0.3.1`](https://github.com/remix-run/remix/releases/tag/data-schema@0.3.1)
+  - [`data-table@0.6.0`](https://github.com/remix-run/remix/releases/tag/data-table@0.6.0)
+  - [`data-table-mysql@0.5.3`](https://github.com/remix-run/remix/releases/tag/data-table-mysql@0.5.3)
+  - [`data-table-postgres@0.5.3`](https://github.com/remix-run/remix/releases/tag/data-table-postgres@0.5.3)
+  - [`data-table-sqlite@0.6.3`](https://github.com/remix-run/remix/releases/tag/data-table-sqlite@0.6.3)
+  - [`fetch-proxy@0.8.6`](https://github.com/remix-run/remix/releases/tag/fetch-proxy@0.8.6)
+  - [`fetch-router@0.22.1`](https://github.com/remix-run/remix/releases/tag/fetch-router@0.22.1)
+  - [`file-storage-s3@0.1.5`](https://github.com/remix-run/remix/releases/tag/file-storage-s3@0.1.5)
+  - [`form-data-middleware@0.3.7`](https://github.com/remix-run/remix/releases/tag/form-data-middleware@0.3.7)
+  - [`form-data-parser@0.17.6`](https://github.com/remix-run/remix/releases/tag/form-data-parser@0.17.6)
+  - [`headers@0.21.2`](https://github.com/remix-run/remix/releases/tag/headers@0.21.2)
+  - [`logger-middleware@0.3.7`](https://github.com/remix-run/remix/releases/tag/logger-middleware@0.3.7)
+  - [`method-override-middleware@0.1.15`](https://github.com/remix-run/remix/releases/tag/method-override-middleware@0.1.15)
+  - [`multipart-parser@0.16.5`](https://github.com/remix-run/remix/releases/tag/multipart-parser@0.16.5)
+  - [`render-middleware@0.3.1`](https://github.com/remix-run/remix/releases/tag/render-middleware@0.3.1)
+  - [`response@0.3.9`](https://github.com/remix-run/remix/releases/tag/response@0.3.9)
+  - [`route-pattern@0.24.1`](https://github.com/remix-run/remix/releases/tag/route-pattern@0.24.1)
+  - [`session-middleware@0.5.0`](https://github.com/remix-run/remix/releases/tag/session-middleware@0.5.0)
+  - [`spa@0.1.2`](https://github.com/remix-run/remix/releases/tag/spa@0.1.2)
+  - [`static-middleware@0.4.16`](https://github.com/remix-run/remix/releases/tag/static-middleware@0.4.16)
+  - [`tar-parser@0.8.0`](https://github.com/remix-run/remix/releases/tag/tar-parser@0.8.0)
+  - [`test@0.6.1`](https://github.com/remix-run/remix/releases/tag/test@0.6.1)
+  - [`ui@0.10.0`](https://github.com/remix-run/remix/releases/tag/ui@0.10.0)
+
+## v3.0.0-rc.2
+
+### Pre-release Changes
+
+- BREAKING CHANGE: Asset fingerprints from `remix/assets` now use hashes of the final file contents. Replace `fingerprint: { buildId }` with `fingerprint: true`. If you use a persistent `files.cache`, move the build identifier to `files.cacheKey` to keep reusing cached files across server restarts. See the [asset server migration steps](https://github.com/remix-run/remix/blob/main/packages/assets/CHANGELOG.md#v070) (see #11706).
+
+- BREAKING CHANGE: Browser scripts served by `remix/assets` now use import maps to resolve imports. Replace separate `getHref()` and `getPreloads()` calls with `getScriptEntry()`, and render `<ImportMap value={importMap} />` from `remix/ui/server` before the entry's preloads and module script.
+
+  Apps with client entries or HMR should also configure `remix/multiple-import-maps-polyfill` for browsers that need support for import maps added at runtime. New apps include this setup. Existing apps should follow the [asset server migration steps](https://github.com/remix-run/remix/blob/main/packages/assets/CHANGELOG.md#v070), including changes to custom rendering integrations (see #11706).
+
+- BREAKING CHANGE: `remix/router` now returns `405 Method Not Allowed` with an `Allow` header when a URL matches a route but the request method does not. These requests previously reached `defaultHandler`, which returned 404 by default. Register an `ANY` route if you need a custom handler for every method at that URL.
+
+  `GET` routes now also serve `HEAD` requests with the same status and headers and an empty body. Explicit `HEAD` routes still take precedence. See the [router release notes](https://github.com/remix-run/remix/blob/main/packages/fetch-router/CHANGELOG.md#v0220) (see #11767).
+
+- BREAKING CHANGE: Custom browser HMR events from `remix/assets` and `remix/node-hmr` now carry update data in a `data` record. Replace top-level `timestamp` and `updates` fields with a named entry such as `data: { 'my-tool@1': { timestamp, updates } }`.
+
+  Apps using the standard asset server and `createBrowserHmrChannel()` integration need no changes to their event handling. See the [HMR migration example](https://github.com/remix-run/remix/blob/main/packages/node-hmr/CHANGELOG.md#v020) (see #11706).
+
+- Added `remix/multiple-import-maps-polyfill` to load and preload JavaScript modules that depend on import maps added at runtime. `importModule()` uses native imports in browsers with support and the polyfill in other browsers. See the [usage guide](https://github.com/remix-run/remix/tree/main/packages/multiple-import-maps-polyfill#usage) (see #11706).
+
+- Fixed scroll timing during frame navigation and history restoration in `remix/ui`. Frames now show HTML validation and error responses with `3xx` or `4xx` status codes, and browsers without `NavigateEvent.sourceElement` support fall back to full document navigation. See the [UI release notes](https://github.com/remix-run/remix/blob/main/packages/ui/CHANGELOG.md#v090).
+
+- Bumped `@remix-run/*` dependencies:
+  - [`assets@0.7.0`](https://github.com/remix-run/remix/releases/tag/assets@0.7.0)
+  - [`async-context-middleware@0.3.6`](https://github.com/remix-run/remix/releases/tag/async-context-middleware@0.3.6)
+  - [`auth@0.3.1`](https://github.com/remix-run/remix/releases/tag/auth@0.3.1)
+  - [`auth-middleware@0.2.6`](https://github.com/remix-run/remix/releases/tag/auth-middleware@0.2.6)
+  - [`cli@0.7.0`](https://github.com/remix-run/remix/releases/tag/cli@0.7.0)
+  - [`compression-middleware@0.1.14`](https://github.com/remix-run/remix/releases/tag/compression-middleware@0.1.14)
+  - [`cop-middleware@0.1.9`](https://github.com/remix-run/remix/releases/tag/cop-middleware@0.1.9)
+  - [`cors-middleware@0.1.9`](https://github.com/remix-run/remix/releases/tag/cors-middleware@0.1.9)
+  - [`csrf-middleware@0.1.9`](https://github.com/remix-run/remix/releases/tag/csrf-middleware@0.1.9)
+  - [`data-table@0.5.1`](https://github.com/remix-run/remix/releases/tag/data-table@0.5.1)
+  - [`data-table-mysql@0.5.2`](https://github.com/remix-run/remix/releases/tag/data-table-mysql@0.5.2)
+  - [`data-table-postgres@0.5.2`](https://github.com/remix-run/remix/releases/tag/data-table-postgres@0.5.2)
+  - [`data-table-sqlite@0.6.2`](https://github.com/remix-run/remix/releases/tag/data-table-sqlite@0.6.2)
+  - [`fetch-router@0.22.0`](https://github.com/remix-run/remix/releases/tag/fetch-router@0.22.0)
+  - [`form-data-middleware@0.3.6`](https://github.com/remix-run/remix/releases/tag/form-data-middleware@0.3.6)
+  - [`logger-middleware@0.3.6`](https://github.com/remix-run/remix/releases/tag/logger-middleware@0.3.6)
+  - [`method-override-middleware@0.1.14`](https://github.com/remix-run/remix/releases/tag/method-override-middleware@0.1.14)
+  - [`multiple-import-maps-polyfill@0.1.0`](https://github.com/remix-run/remix/releases/tag/multiple-import-maps-polyfill@0.1.0)
+  - [`node-hmr@0.2.0`](https://github.com/remix-run/remix/releases/tag/node-hmr@0.2.0)
+  - [`render-middleware@0.3.0`](https://github.com/remix-run/remix/releases/tag/render-middleware@0.3.0)
+  - [`session-middleware@0.4.1`](https://github.com/remix-run/remix/releases/tag/session-middleware@0.4.1)
+  - [`spa@0.1.1`](https://github.com/remix-run/remix/releases/tag/spa@0.1.1)
+  - [`static-middleware@0.4.15`](https://github.com/remix-run/remix/releases/tag/static-middleware@0.4.15)
+  - [`ui@0.9.0`](https://github.com/remix-run/remix/releases/tag/ui@0.9.0)
+
+## v3.0.0-rc.1
+
+### Pre-release Changes
+
+- BREAKING CHANGE: In `createAssetServer()` from `remix/assets`, replace the `fileMap` option with optional directory-based `mounts`. Mounts recursively preserve the path beneath each public and filesystem root, keeping module URLs aligned with the filesystem hierarchy used for package resolution.
+
+  When `mounts` is omitted, the asset server uses `{ app: 'app', npm: 'node_modules' }`.
+
+  To migrate an app whose `fileMap` is equivalent to the new defaults, remove the `fileMap` option entirely:
+
+  ```ts
+  // before
+  createAssetServer({
+    basePath: '/assets',
+    fileMap: {
+      '/app/*path': 'app/*path',
+      '/npm/*path': 'node_modules/*path',
+    },
+    // ...
+  })
+
+  // after
+  createAssetServer({
+    basePath: '/assets',
+    // ...
+  })
+  ```
+
+  To migrate custom `fileMap` rules that preserve directory hierarchy, remove the trailing wildcard from both sides and rename `fileMap` to `mounts`:
+
+  ```ts
+  // before
+  createAssetServer({
+    basePath: '/assets',
+    fileMap: {
+      '/source/*path': 'app/*path',
+      '/vendor/*path': 'node_modules/*path',
+    },
+    // ...
+  })
+
+  // after
+  createAssetServer({
+    basePath: '/assets',
+    mounts: {
+      source: 'app',
+      vendor: 'node_modules',
+    },
+    // ...
+  })
+  ```
+
+- BREAKING CHANGE: Remove the built-in Atmosphere auth provider and its DPoP-specific types from `remix/auth`. Use `OAuthTokens` in place of `OAuthStandardTokens`. Custom provider packages can use `createOAuthProvider()` and extend `OAuthTokens` with protocol-specific data. Applications using the Atmosphere provider must remove it or move their atproto authentication to a separate package.
+
+- BREAKING CHANGE: Remove `addEventListeners()` from `remix/ui`. Use native `target.addEventListener(type, listener, { signal })` instead. If a listener used the helper's second callback argument, create an `AbortController` and abort it when the listener runs again or its lifetime signal aborts.
+
+- BREAKING CHANGE: Remix UI framework-owned DOM attributes now consistently use the `data-rmx-*` namespace. Update navigation, DOM preservation, and reconciliation key attributes to their new `data-rmx-*` names.
+
+- BREAKING CHANGE: During server rendering through `remix/ui`, script elements with non-string children previously serialized those children as escaped HTML text. They now render empty and report an error. Pass a single string child to preserve script content without HTML entity escaping; script-tag sequences that could terminate the element remain escaped.
+
+- Add `remix db rollback` for reverting applied migrations with step, target, and dry-run bounds (see #11723).
+
+- Add shared asset configuration and inspection through `remix/cli` and `remix/assets`, including `loadConfig()`, `remix assets`, `remix assets inspect <url-or-file>`, `assetServer.getAssets()`, and `assetServer.getAssetDetails()` (see #11726).
+
+- Add the `runRemixDb()` rollback command through `remix/data-table/cli` (see #11723).
+
+- Add a `package.json` export:
+  - `remix/spa` to expose SPA render middleware and the client runtime from `@remix-run/spa`
+
+- Add the conventional Remix UI `render()` middleware to `remix/middleware/render`, including built-in frame and client-entry asset integration (see #11607).
+
+- Ship the `remix.json` JSON Schema at `remix/schema/remix.json` so projects can use version-matched editor validation without a network connection.
+
+- Move Remix 3 from beta to its first release candidate, `3.0.0-rc.1`.
+
+- Bumped `@remix-run/*` dependencies:
+  - [`assets@0.6.0`](https://github.com/remix-run/remix/releases/tag/assets@0.6.0)
+  - [`auth@0.3.0`](https://github.com/remix-run/remix/releases/tag/auth@0.3.0)
+  - [`cli@0.6.0`](https://github.com/remix-run/remix/releases/tag/cli@0.6.0)
+  - [`data-table@0.5.0`](https://github.com/remix-run/remix/releases/tag/data-table@0.5.0)
+  - [`data-table-mysql@0.5.1`](https://github.com/remix-run/remix/releases/tag/data-table-mysql@0.5.1)
+  - [`data-table-postgres@0.5.1`](https://github.com/remix-run/remix/releases/tag/data-table-postgres@0.5.1)
+  - [`data-table-sqlite@0.6.1`](https://github.com/remix-run/remix/releases/tag/data-table-sqlite@0.6.1)
+  - [`render-middleware@0.2.0`](https://github.com/remix-run/remix/releases/tag/render-middleware@0.2.0)
+  - [`spa@0.1.0`](https://github.com/remix-run/remix/releases/tag/spa@0.1.0)
+  - [`ui@0.8.0`](https://github.com/remix-run/remix/releases/tag/ui@0.8.0)
+
 ## v3.0.0-beta.10
 
 ### Pre-release Changes
@@ -59,7 +269,7 @@ This is the changelog for [`remix`](https://github.com/remix-run/remix/tree/main
 
   ```jsonc
   {
-    "$schema": "https://remix.run/schemas/remix.json",
+    "$schema": "./node_modules/remix/schema/remix.json",
     "test": {
       "type": ["server"],
       "concurrency": 1,
@@ -95,7 +305,7 @@ This is the changelog for [`remix`](https://github.com/remix-run/remix/tree/main
 
   ```jsonc
   {
-    "$schema": "https://remix.run/schemas/remix.json",
+    "$schema": "./node_modules/remix/schema/remix.json",
     "db": {
       "adapter": {
         "type": "sqlite",
@@ -282,7 +492,7 @@ This is the changelog for [`remix`](https://github.com/remix-run/remix/tree/main
 
   ```jsonc
   {
-    "$schema": "https://remix.run/schemas/remix.json",
+    "$schema": "./node_modules/remix/schema/remix.json",
     "test": {
       "type": ["server"],
       "concurrency": 1,
@@ -318,7 +528,7 @@ This is the changelog for [`remix`](https://github.com/remix-run/remix/tree/main
 
   ```jsonc
   {
-    "$schema": "https://remix.run/schemas/remix.json",
+    "$schema": "./node_modules/remix/schema/remix.json",
     "db": {
       "adapter": {
         "type": "sqlite",

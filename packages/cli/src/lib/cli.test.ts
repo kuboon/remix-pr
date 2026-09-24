@@ -27,14 +27,15 @@ const ROOT_HELP_TEXT = [
   '  remix <command> [options]',
   '',
   'Commands:',
-  '  completion      Print shell completion scripts for Remix',
-  '  help [command]  Show help for Remix commands',
-  '  new <name>      Create a new Remix project',
-  '  db <command>    Manage the current app database',
-  '  doctor          Check project health for the current project',
-  '  routes          Show the route tree for the current project',
-  '  test [glob]     Run tests for the current project',
-  '  version         Show the current Remix version',
+  '  assets [command]  List or inspect browser-reachable assets',
+  '  completion        Print shell completion scripts for Remix',
+  '  help [command]    Show help for Remix commands',
+  '  new <name>        Create a new Remix project',
+  '  db <command>      Manage the current app database',
+  '  doctor            Check project health for the current project',
+  '  routes            Show the route tree for the current project',
+  '  test [glob]       Run tests for the current project',
+  '  version           Show the current Remix version',
   '',
   'Options:',
   '  --config <path>  Use a custom Remix config file',
@@ -43,6 +44,7 @@ const ROOT_HELP_TEXT = [
   '  -v, --version    Show version',
   '',
   'Examples:',
+  '  remix assets',
   '  remix completion bash',
   '  remix help',
   '  remix help completion',
@@ -97,6 +99,7 @@ const HELP_COMMAND_HELP_TEXT = [
   '',
   'Examples:',
   '  remix help',
+  '  remix help assets',
   '  remix help completion',
   '  remix help db',
   '  remix help doctor',
@@ -325,6 +328,7 @@ describe('run', () => {
   })
 
   it('prints command help from the help command', async () => {
+    let assetsHelp = await captureOutput(() => run(['help', 'assets']))
     let doctorHelp = await captureOutput(() => run(['help', 'doctor']))
     let completionHelp = await captureOutput(() => run(['help', 'completion']))
     let newHelp = await captureOutput(() => run(['help', 'new']))
@@ -333,6 +337,9 @@ describe('run', () => {
     let testHelp = await captureOutput(() => run(['help', 'test']))
     let versionHelp = await captureOutput(() => run(['help', 'version']))
 
+    assert.equal(assetsHelp.exitCode, 0)
+    assert.match(assetsHelp.stdout, /remix assets inspect <url-or-file>/)
+    assert.equal(assetsHelp.stderr, '')
     assert.equal(doctorHelp.exitCode, 0)
     assert.equal(doctorHelp.stdout, DOCTOR_COMMAND_HELP_TEXT)
     assert.equal(doctorHelp.stderr, '')
@@ -497,16 +504,17 @@ describe('run', () => {
       let server = await fs.readFile(path.join(appDir, 'server.ts'), 'utf8')
       let assets = await fs.readFile(path.join(appDir, 'app', 'assets.ts'), 'utf8')
       let router = await fs.readFile(path.join(appDir, 'app', 'router.ts'), 'utf8')
+      let document = await fs.readFile(path.join(appDir, 'app', 'actions', 'document.tsx'), 'utf8')
       let entry = await fs.readFile(
         path.join(appDir, 'app', 'actions', 'public', 'entry.ts'),
         'utf8',
       )
-      let renderMiddleware = await fs.readFile(
-        path.join(appDir, 'app', 'middleware', 'render.tsx'),
-        'utf8',
-      )
       let controller = await fs.readFile(
         path.join(appDir, 'app', 'actions', 'controller.tsx'),
+        'utf8',
+      )
+      let controllerTest = await fs.readFile(
+        path.join(appDir, 'app', 'actions', 'controller.test.ts'),
         'utf8',
       )
 
@@ -520,35 +528,43 @@ describe('run', () => {
       assert.match(packageJson.scripts.hmr, /NODE_ENV=development/)
       assert.match(packageJson.scripts.hmr, /node hmr\.ts/)
       assert.match(packageJson.scripts.start, /NODE_ENV=production/)
-      assert.match(packageJson.scripts.test, /NODE_ENV=test/)
+      assert.match(packageJson.scripts.test, /NODE_ENV=test remix test/)
+      assert.match(controllerTest, /from 'remix\/test'/)
       assert.match(agentsGuide, /^# My App Agent Guide/m)
       assert.match(agentsGuide, /This starter intentionally begins small/)
       assert.match(agentsGuide, /Put top-level route actions in `app\/actions\/controller\.tsx`/)
       assert.match(readme, /^# My App/m)
       assert.match(hmr, /createHmrReadyFetch/)
       assert.match(hmr, /run\('server\.ts'/)
+      assert.match(hmr, /xForwardedHeaders: true/)
       assert.match(server, /import \* as http from 'node:http'/)
       assert.match(server, /import \{ createRequestListener \} from 'remix\/node-fetch-server'/)
+      assert.match(server, /const isHmr = process\.env\.REMIX_NODE_HMR === '1'/)
       assert.match(server, /http\.createServer/)
       assert.match(server, /createRequestListener/)
+      assert.match(server, /trustProxy: isHmr/)
       assert.match(server, /emitServerReady/)
       assert.doesNotMatch(assets, /remix-template:remove-/)
+      assert.doesNotMatch(assets, /\bmounts\s*:/)
       assert.doesNotMatch(assets, /\.\.\/packages/)
       assert.match(assets, /allowFiles: \['app\/routes\.ts', 'app\/\*\*\/public\/\*\*'\]/)
       assert.match(assets, /denyFiles: \['app\/\*\*\/\*\.test\.\*'\]/)
       assert.match(assets, /const entry = 'app\/actions\/public\/entry\.ts'/)
-      assert.match(assets, /getHref\(entry\)/)
-      assert.match(assets, /getPreloads\(entry\)/)
+      assert.match(assets, /getScriptEntry\(entry\)/)
       assert.match(assets, /createBrowserHmrChannel/)
+      assert.match(assets, /moduleImporter: 'remix\/multiple-import-maps-polyfill'/)
       assert.match(assets, /scripts: \{ loaders: isHmr \? \[uiHmr\(\)\] : undefined \}/)
       assert.match(assets, /watch: isDevelopment/)
       assert.match(router, /staticFiles\('\.\/public'/)
+      assert.match(router, /import \{ render \} from 'remix\/middleware\/render'/)
+      assert.match(router, /render\(\{ assets \}\)/)
+      assert.match(document, /import \{ ImportMap \} from 'remix\/ui\/server'/)
+      assert.match(document, /<ImportMap value=\{importMap\} \/>/)
       assert.match(entry, /loadModule/)
-      assert.match(entry, /resolveFrame/)
+      assert.match(entry, /detectMultipleImportMapSupport/)
+      assert.match(entry, /processClientEntryPreloads/)
+      assert.doesNotMatch(entry, /resolveFrame/)
       assert.match(entry, /server:update/)
-      assert.match(renderMiddleware, /resolveClientEntry/)
-      assert.match(renderMiddleware, /getPreloads/)
-      assert.match(renderMiddleware, /resolveFrame/)
       assert.match(controller, /context\.render\(<HomePage \/>/)
       await assertPathExists(path.join(appDir, 'app', 'routes.ts'))
       await assertPathExists(path.join(appDir, 'hmr.ts'))
@@ -558,7 +574,7 @@ describe('run', () => {
       await assertPathExists(path.join(appDir, 'app', 'actions', 'home-page.tsx'))
       await assertPathExists(path.join(appDir, 'app', 'actions', 'public', 'prompt-button.tsx'))
       await assertPathExists(path.join(appDir, 'app', 'actions', 'public', 'entry.ts'))
-      await assertPathExists(path.join(appDir, 'app', 'middleware', 'render.tsx'))
+      await assertPathMissing(path.join(appDir, 'app', 'middleware', 'render.tsx'))
       await assertPathExists(path.join(appDir, 'public', 'favicon.svg'))
       await assertPathExists(path.join(appDir, '.gitignore'))
       await assertPathMissing(path.join(appDir, 'gitignore'))

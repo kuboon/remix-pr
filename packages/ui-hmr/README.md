@@ -35,12 +35,14 @@ let isDevelopment = process.env.NODE_ENV === 'development'
 
 let assetServer = createAssetServer({
   basePath: '/assets',
-  fileMap: { '/app/*path': 'app/*path' },
   allowFiles: ['app/routes.ts', 'app/**/public/**'],
   allowPackages: ['remix'],
   denyFiles: ['app/**/*.test.*'],
   hmr: isDevelopment
-    ? async () => (await import('remix/node-hmr/runtime')).createBrowserHmrChannel()
+    ? {
+        channel: async () => (await import('remix/node-hmr/runtime')).createBrowserHmrChannel(),
+        moduleImporter: 'remix/multiple-import-maps-polyfill',
+      }
     : undefined,
   scripts: {
     loaders: isDevelopment ? [uiHmr()] : undefined,
@@ -48,6 +50,8 @@ let assetServer = createAssetServer({
   watch: isDevelopment,
 })
 ```
+
+HMR appends mappings for updated modules to the document in additional `<script type="importmap">` elements. The module importer allows browsers without native support for multiple import maps to load these updates.
 
 ## Direct Transforms
 

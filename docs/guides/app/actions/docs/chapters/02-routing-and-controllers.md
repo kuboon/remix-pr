@@ -217,7 +217,7 @@ Router middleware runs first, then controller middleware, then action middleware
 
 ## Responses, redirects, headers, and errors
 
-Actions return Web `Response` objects. To render pages, you will often set up `render` middleware and add it to the router. That middleware provides `context.render(...)`, which turns a Remix component tree into an HTML response. [Rendering UI](/rendering-ui/) covers the component tree, while [Streaming UI with Frames](/streaming-ui-with-frames/) covers the renderer behind it. Once the middleware is installed, use it in an action:
+Actions return Web `Response` objects. To render pages, add `render()` from `remix/middleware/render` to the router. That middleware provides `context.render(...)`, which turns a Remix component tree into an HTML response. [Rendering UI](/rendering-ui/) covers the component tree, while [Streaming UI with Frames](/streaming-ui-with-frames/) covers the renderer behind it. Once the middleware is installed, use it in an action:
 
 ```tsx filename=app/actions/albums/controller.tsx
 // inside the show action:
@@ -226,7 +226,7 @@ return context.render(<AlbumPage album={album} />);
 
 The result is still an ordinary Web `Response`. An action can render a page, return text or JSON, redirect the browser, send a file, or return an error response.
 
-Expected outcomes such as invalid input, conflicts, and missing records should also return a `Response` with the appropriate status. Reserve thrown errors for unexpected failures. If an action or middleware throws, `router.fetch(...)` rejects so the server boundary can log the error and return a `500` response. The [Errors and Error Boundaries](/errors-and-error-boundaries/) chapter covers that path in detail.
+Expected outcomes such as invalid input, conflicts, and missing records should also return a `Response` with the appropriate status. Reserve thrown errors for unexpected failures. If an action or middleware throws, `router.fetch(...)` rejects so the server boundary can log the error and return a `500` response. The [Errors and Cancellation](/errors-and-cancellation/) chapter covers that path in detail.
 
 A text response can be as simple as:
 

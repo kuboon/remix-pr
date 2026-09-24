@@ -1,5 +1,17 @@
 {
-  "$schema": "https://remix.run/schemas/remix.json",
+  "$schema": "node_modules/remix/schema/remix.json",
+  "assets": {
+    "rootDir": "../..",
+    "basePath": "/assets",
+    "mounts": {
+      "app": "demos/timeboxer/app",
+      "npm": "node_modules",
+      "packages": "packages"
+    },
+    "allowFiles": ["demos/timeboxer/app/routes.ts", "demos/timeboxer/app/**/public/**"],
+    "allowPackages": ["remix"],
+    "denyFiles": ["demos/timeboxer/app/**/*.test.*"]
+  },
   "db": {
     "adapter": {
       "type": "sqlite",

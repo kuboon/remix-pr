@@ -1,6 +1,6 @@
 {
   "name": "remix",
-  "version": "3.0.0-beta.10",
+  "version": "3.0.0-rc.3",
   "description": "The Remix web framework",
   "author": "Michael Jackson <mjijackson@gmail.com>",
   "license": "MIT",
@@ -11,9 +11,12 @@
   },
   "homepage": "https://github.com/remix-run/remix/tree/main/packages/remix#readme",
   "files": [
+    "guides",
+    "INDEX.md",
     "LICENSE",
     "README.md",
     "dist",
+    "schema",
     "src"
   ],
   "type": "module",
@@ -21,6 +24,9 @@
     "node": ">=24.3.0"
   },
   "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    },
     "./assert": "./src/assert.ts",
     "./assets": "./src/assets.ts",
     "./assets/types/hmr": {
@@ -83,6 +89,7 @@
     "./mime": "./src/mime.ts",
     "./multipart-parser": "./src/multipart-parser.ts",
     "./multipart-parser/node": "./src/multipart-parser/node.ts",
+    "./multiple-import-maps-polyfill": "./src/multiple-import-maps-polyfill.ts",
     "./node-fetch-server": "./src/node-fetch-server.ts",
     "./node-fetch-server/test": "./src/node-fetch-server/test.ts",
     "./node-hmr": "./src/node-hmr.ts",
@@ -109,6 +116,7 @@
     "./session-storage/memcache": "./src/session-storage-memcache.ts",
     "./session-storage/memory": "./src/session/memory-storage.ts",
     "./session-storage/redis": "./src/session-storage-redis.ts",
+    "./spa": "./src/spa.ts",
     "./tar-parser": "./src/tar-parser.ts",
     "./terminal": "./src/terminal.ts",
     "./test": "./src/test.ts",
@@ -149,6 +157,9 @@
   },
   "publishConfig": {
     "exports": {
+      ".": {
+        "types": "./dist/index.d.ts"
+      },
       "./assert": {
         "types": "./dist/assert.d.ts",
         "default": "./dist/assert.js"
@@ -388,6 +399,10 @@
         "types": "./dist/multipart-parser/node.d.ts",
         "default": "./dist/multipart-parser/node.js"
       },
+      "./multiple-import-maps-polyfill": {
+        "types": "./dist/multiple-import-maps-polyfill.d.ts",
+        "default": "./dist/multiple-import-maps-polyfill.js"
+      },
       "./node-fetch-server": {
         "types": "./dist/node-fetch-server.d.ts",
         "default": "./dist/node-fetch-server.js"
@@ -482,6 +497,10 @@
       "./session-storage/redis": {
         "types": "./dist/session-storage-redis.d.ts",
         "default": "./dist/session-storage-redis.js"
+      },
+      "./spa": {
+        "types": "./dist/spa.d.ts",
+        "default": "./dist/spa.js"
       },
       "./tar-parser": {
         "types": "./dist/tar-parser.d.ts",
@@ -684,15 +703,16 @@
     "@remix-run/render-middleware": "workspace:^",
     "@remix-run/node-hmr": "workspace:^",
     "@remix-run/ui-hmr": "workspace:^",
-    "@remix-run/static-middleware": "workspace:^"
+    "@remix-run/spa": "workspace:^",
+    "@remix-run/static-middleware": "workspace:^",
+    "@remix-run/multiple-import-maps-polyfill": "workspace:^"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node ../../scripts/copy-package-type-only-exports.ts .",
     "clean": "git clean -fdX",
-    "postpack": "pnpm run sync-readmes -- --clean",
-    "prepack": "pnpm run sync-readmes",
+    "postpack": "node ../../scripts/sync-remix-package-files.ts --clean",
+    "prepack": "node ../../scripts/sync-remix-package-files.ts",
     "prepublishOnly": "pnpm run build",
-    "sync-readmes": "node ../../scripts/sync-remix-readmes.ts",
     "test": "remix test",
     "typecheck": "tsc --noEmit"
   },
@@ -718,5 +738,15 @@
     "playwright": {
       "optional": true
     }
-  }
+  },
+  "sideEffects": [
+    "./src/cli-entry.ts",
+    "./src/node-hmr/runtime.ts",
+    "./src/node-tsx.ts",
+    "./src/ui-hmr/node.ts",
+    "./dist/cli-entry.js",
+    "./dist/node-hmr/runtime.js",
+    "./dist/node-tsx.js",
+    "./dist/ui-hmr/node.js"
+  ]
 }

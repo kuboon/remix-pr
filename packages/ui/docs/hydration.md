@@ -58,10 +58,35 @@ let app = run({
 await app.ready()
 ```
 
+`run()` also creates `app.frames.top` for the current document and starts listening for Navigation
+API events. Eligible same-origin links and forms then use soft navigation: Remix fetches their HTML
+through the frame resolver and updates the existing document instead of loading a new one. This
+happens even when the page only uses `clientEntry()` and does not render an explicit `<Frame>`.
+
+See [Link navigation](./frames.md#link-navigation) for the document-level effects of soft navigation
+and how to opt out for one navigation or the whole app.
+
 ### `run` options
 
 - **`loadModule(moduleUrl, exportName)`** (required) - Called for each client entry found in the page. Return the component function. Typically uses dynamic `import()`.
+- **`processClientEntryPreloads(preloads)`** (optional) - Processes module preloads discovered in frame responses before they are added to the document. Return the preload URLs that should remain as native `<link rel="modulepreload">` elements.
 - **`resolveFrame(src, options)`** (optional) - Overrides the default `fetch()` resolver when a `<Frame>` needs to load or reload content and when a link or form performs a frame navigation. `options` may contain `signal` and `target`; non-GET forms also provide `formData`, `method`, and `encType`. GET form values are already encoded in `src`. See [Frames](./frames.md#form-navigation) for request encoding, targeting, and opt-outs.
+
+### Trusted documents and module loading
+
+The initial document and HTML returned by `resolveFrame` are trusted application content. They can
+select client-entry modules and contribute import maps, styles, and nested frames. Only return HTML
+from sources the application trusts to run code in the current page. The default resolver restricts
+requests and redirects to the document origin, but Remix does not sanitize the returned HTML and
+same-origin user-generated content is not implicitly safe.
+
+Remix passes each serialized module specifier unchanged to `loadModule`. The loader controls how it
+resolves that specifier, so client entries can use CDN URLs, development server URLs, or bare
+specifiers resolved through import maps or a custom loader. With `import(moduleUrl)`, relative
+specifiers resolve from the module containing that import, subject to the document's import map.
+Applications that restrict module sources should enforce that policy in their loader before
+importing code. The runtime's check that the returned export is a function happens after loading;
+it checks the component shape, not whether the module is trusted.
 
 ### `app` properties
 
@@ -102,7 +127,7 @@ This means:
 - The page is fully rendered and interactive as soon as modules load. No blank flash.
 - Only marked components ship JavaScript. Static content stays static.
 - Client entries can appear anywhere in the tree, including inside frames.
-- Client entries inside `rmx-preserve-dom` hydrate during initial boot, but future frame reloads will not patch new server-rendered children or props through that preserved host. See [Preserving client-owned DOM](./frames.md#preserving-client-owned-dom).
+- Client entries inside `data-rmx-preserve-dom` hydrate during initial boot, but future frame reloads will not patch new server-rendered children or props through that preserved host. See [Preserving client-owned DOM](./frames.md#preserving-client-owned-dom).
 
 ## See Also
 

@@ -2,6 +2,96 @@
 
 This is the changelog for [`ui`](https://github.com/remix-run/remix/tree/main/packages/ui). It follows [semantic versioning](https://semver.org/).
 
+## v0.10.0
+
+### Minor Changes
+
+- BREAKING CHANGE: Navigations that specify a named frame that is not currently mounted now perform a document navigation instead of reloading the top frame. Fresh links, forms, and `navigate()` calls are left to the browser, preserving native form methods and bodies, while back and forward traversal reloads the destination document. Omit the target when the navigation should always reload the top frame:
+
+  ```diff
+  -<a href="/account" data-rmx-target="optional-account">
+  +<a href="/account">
+  ```
+
+- BREAKING CHANGE: The default `resolveFrame` now only fetches same-origin sources and follows same-origin redirects. Apps that load cross-origin frame content must provide a custom `resolveFrame` to `run()`.
+
+  Validate navigation source overrides regardless of the target, falling back to document navigation for invalid or cross-origin overrides.
+
+- BREAKING CHANGE: Raw HTML props now require an opaque value created by `unsafeHTML()`. This applies to `innerHTML` and both iframe `srcDoc` spellings (`srcDoc` and `srcdoc`). It prevents attacker-controlled prop spreads from activating HTML parsing with plain strings or JSON-shaped objects. `outerHTML` is not supported because it would replace a reconciler-owned element. `unsafeHTML()` is an explicit authorization boundary; it does not sanitize or otherwise modify its input.
+
+  ```diff
+  -import type { Handle } from 'remix/ui'
+  +import { unsafeHTML } from 'remix/ui'
+  +import type { Handle } from 'remix/ui'
+
+   function Content(handle: Handle<{ html: string }>) {
+  -  return () => <div innerHTML={handle.props.html} />
+  +  return () => <div innerHTML={unsafeHTML(handle.props.html)} />
+   }
+  ```
+
+### Patch Changes
+
+- Ignore invalid host prop names and reserved DOM mutation properties during server rendering and client reconciliation. Block `javascript:` URLs in executable URL attributes while preserving other URL schemes and non-executable attributes. Use the `on()` mixin for events; the explicit `innerHTML` API and standard DOM, `data-*`, `aria-*`, SVG, and custom-element properties continue to work as before.
+
+- Fix duplicated text during hydration when a browser splits long server-rendered text into multiple DOM nodes, including chunks that span adjacent text children (see #11591).
+
+- Avoid attaching duplicate event handlers when a client entry imports and renders another client entry, including through fragments and wrapper components. Preserve deferred removal and exit animations when removing nested client entries (see #11844).
+
+- Restore the previous named frame from `handle.frames.get(name)` when a more recently mounted frame with the same name unmounts.
+
+## v0.9.0
+
+### Minor Changes
+
+- Client entries can now provide import maps through `resolveClientEntry()`. The `<ImportMap>` component from `remix/ui/server` combines your mappings with those from blocking client entries so the initial document contains one complete import map. New mappings from later frame responses are installed before their client entries load. Plain `<script type="importmap">` elements remain supported when you do not need to combine mappings (see #11706).
+
+  When a frame response changes an installed import mapping or integrity value, Remix loads a fresh document so navigation after a deployment cannot mix old and new modules.
+
+- `run()` now accepts a `processClientEntryPreloads` callback to handle preloads for client entries discovered after the initial page load. Use it with `remix/multiple-import-maps-polyfill` to preload modules in browsers that need the polyfill, returning an empty array to skip native modulepreload links. See the [client entry setup example](https://github.com/remix-run/remix/tree/main/packages/multiple-import-maps-polyfill#usage) (see #11706).
+
+### Patch Changes
+
+- `handle.update()` now warns and skips the extra render when called during component setup. Calls during rendering, or before the initial commit from outside setup, report a clear component error. Move these updates into an event handler or a `handle.queueTask()` callback (see #11795).
+
+- Fixed delayed scroll resets and history scroll restoration during frame navigation. Scroll now updates once the destination and its blocking frames first render, without waiting for the rest of the streamed content or client entry hydration. Also fixed scroll jumps in Chromium and stale or repeated scroll changes during redirects and overlapping reloads (see #11755).
+
+  Failed `frame.reload()` calls no longer cause a second unhandled promise rejection when the caller already handles the error.
+
+- Browsers without `NavigateEvent.sourceElement` support now use full document navigation, so links and forms keep working when frame navigation is unavailable (see #11820).
+
+- Frames now render HTML responses with `3xx` and `4xx` status codes, so form validation messages and error pages appear in the frame when using the default resolver. HTML content types are now recognized regardless of case (see #11823).
+
+## v0.8.0
+
+### Minor Changes
+
+- BREAKING CHANGE: Remix UI framework-owned DOM attributes now consistently use the `data-rmx-*` namespace. Rename `rmx-document`, `rmx-target`, `rmx-src`, `rmx-history`, `rmx-reset-scroll`, `rmx-preserve-dom`, and `data-key` to `data-rmx-document`, `data-rmx-target`, `data-rmx-src`, `data-rmx-history`, `data-rmx-reset-scroll`, `data-rmx-preserve-dom`, and `data-rmx-key`. Generated style and module preload markers now use `data-rmx-style` and `data-rmx-module-preload` instead of `data-rmx`.
+
+- BREAKING CHANGE: During server rendering, script elements with non-string children previously serialized those children as escaped HTML text. They now render empty and report an error. Pass a single string child, such as `JSON.stringify(value)`, to embed script content without HTML entity escaping. Script-tag sequences that could terminate the element remain escaped.
+
+- BREAKING CHANGE: Remove `addEventListeners()`. Use native `target.addEventListener(type, listener, { signal })` instead. If a listener used the helper's second callback argument, create an `AbortController` and abort it when the listener runs again or its lifetime signal aborts.
+
+- Added a browser-only SPA response protocol to `remix/ui` for associating bodyless route responses with Remix UI nodes. Application code uses the higher-level `render()` and `run()` APIs from `remix/spa`.
+
+### Patch Changes
+
+- Prevent aborted `renderToStream` requests with multiple blocking `Frame`s from producing unhandled promise rejections that can crash Node servers.
+
+- Changed the scheduler's cascading update guard to warn when many component updates happen in one event-loop turn and only throw the infinite-loop error when a single component instance repeatedly updates itself. This keeps large `clientEntry` hydration bursts interactive while still surfacing component names and counts for diagnosis.
+
+- Fixed `mix` prop types to accept argument-bearing mixins authored for a base element type on compatible subtype elements.
+
+- Gracefully degrade to document navigations for browsers that do not support the Navigation API (see #11665).
+
+- Fix `data-rmx-reset-scroll="false"` and `navigate(..., { resetScroll: false })` to preserve the current scroll position. Default navigations now leave scroll resets and history restoration to the browser.
+
+- Adjust CSS escaping to preserve CSS range media queries such as `@media (width < 900px)` in server-rendered `css()` output while continuing to neutralize literal closing `</style>` tags.
+
+- Restore saved scroll positions for intercepted back and forward navigations when client entry reconciliation temporarily shrinks the document or triggers scroll anchoring, while continuing to wait for nested blocking frames before the Navigation API restores scrolling.
+
+- Prevent Safari Navigation API scroll resets from desynchronizing page hit testing after intercepted push and replace navigations (see [WebKit bug 309542](https://bugs.webkit.org/show_bug.cgi?id=309542)).
+
 ## v0.7.0
 
 ### Minor Changes

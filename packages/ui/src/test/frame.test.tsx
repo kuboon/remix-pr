@@ -61,6 +61,24 @@ async function renderFrameContent(content: RemixNode): Promise<string> {
   return await drain(renderToStream(content))
 }
 
+function waitForElement(
+  selector: string,
+  predicate: (element: Element) => boolean = () => true,
+): Promise<Element> {
+  let element = document.querySelector(selector)
+  if (element && predicate(element)) return Promise.resolve(element)
+
+  return new Promise((resolve) => {
+    let observer = new MutationObserver(() => {
+      let element = document.querySelector(selector)
+      if (!element || !predicate(element)) return
+      observer.disconnect()
+      resolve(element)
+    })
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+  })
+}
+
 function createDisposableEntry(id: string, onDispose: () => void) {
   return clientEntry(id, function Entry(handle: Handle) {
     handle.signal.addEventListener('abort', onDispose)
@@ -154,8 +172,8 @@ async function navigateWithLink(
 ): Promise<void> {
   let link = document.createElement('a')
   link.href = href
-  link.setAttribute('rmx-target', options.target)
-  if (options.src !== undefined) link.setAttribute('rmx-src', options.src)
+  link.setAttribute('data-rmx-target', options.target)
+  if (options.src !== undefined) link.setAttribute('data-rmx-src', options.src)
   document.body.append(link)
 
   link.click()
@@ -202,7 +220,7 @@ describe('run', () => {
         formData,
         method: 'post',
         signal,
-      })
+      }).finished
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
       let [src, init] = fetchMock.mock.calls[0]!.arguments
@@ -210,6 +228,7 @@ describe('run', () => {
       expect(init?.body).toBe(formData)
       expect(new Headers(init?.headers).get('Accept')).toBe('text/html')
       expect(init?.method).toBe('post')
+      expect(init?.mode).toBe('same-origin')
       expect(init?.signal).toBeInstanceOf(AbortSignal)
       expect(document.getElementById('account')?.textContent).toBe('Ada')
     } finally {
@@ -217,13 +236,196 @@ describe('run', () => {
     }
   })
 
-  it('rejects non-OK responses from the default resolver without replacing frame content', async (t) => {
+  it('uses same-origin requests for explicitly cross-origin frame sources', async (t) => {
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          '<!DOCTYPE html><html><head></head><body><main id="external">External frame</main></body></html><!-- rmx:flush document -->',
+        ),
+    )
+    let app = run({ loadModule: mock.fn() })
+    await app.ready()
+    app.frames.top.src = 'https://frames.example/partial'
+
+    try {
+      await app.frames.top.reload()
+      expect(fetchMock.mock.calls[0]?.arguments[0]).toBe('https://frames.example/partial')
+      expect(fetchMock.mock.calls[0]?.arguments[1]?.mode).toBe('same-origin')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('uses same-origin requests when the document base is cross-origin', async (t) => {
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          '<!DOCTYPE html><html><head></head><body><main id="external">External frame</main></body></html><!-- rmx:flush document -->',
+        ),
+    )
+    let base = document.createElement('base')
+    base.href = 'https://frames.example/partials/'
+    document.head.prepend(base)
+    let app = run({ loadModule: mock.fn() })
+    await app.ready()
+    app.frames.top.src = 'details'
+
+    try {
+      await app.frames.top.reload()
+      expect(fetchMock.mock.calls[0]?.arguments[0]).toBe('details')
+      expect(fetchMock.mock.calls[0]?.arguments[1]?.mode).toBe('same-origin')
+    } finally {
+      app.dispose()
+      base.remove()
+    }
+  })
+
+  it('allows custom resolvers to fetch cross-origin frame sources', async (t) => {
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          '<!DOCTYPE html><html><head></head><body><main id="external">External frame</main></body></html><!-- rmx:flush document -->',
+        ),
+    )
+    let app = run({
+      loadModule: mock.fn(),
+      resolveFrame(src, options) {
+        return fetch(src, { mode: 'cors', signal: options?.signal })
+      },
+    })
+    await app.ready()
+    app.frames.top.src = 'https://frames.example/partial'
+
+    try {
+      await app.frames.top.reload()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock.mock.calls[0]?.arguments[0]).toBe('https://frames.example/partial')
+      expect(fetchMock.mock.calls[0]?.arguments[1]?.mode).toBe('cors')
+      expect(document.getElementById('external')?.textContent).toBe('External frame')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('renders 3xx HTML responses from the default resolver', async (t) => {
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          '<!DOCTYPE html><html><head></head><body><main id="choices">Multiple choices</main></body></html><!-- rmx:flush document -->',
+          {
+            headers: { 'Content-Type': 'text/html' },
+            status: 300,
+            statusText: 'Multiple Choices',
+          },
+        ),
+    )
+
+    let app = run({ loadModule: mock.fn() })
+    await app.ready()
+    app.frames.top.src = '/choices'
+
+    try {
+      await app.frames.top.reload()
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(document.getElementById('choices')?.textContent).toBe('Multiple choices')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('rejects non-HTML 3xx responses from the default resolver', async (t) => {
     document.body.innerHTML = '<main id="initial">Initial</main>'
     let fetchMock = t.mock.method(
       globalThis,
       'fetch',
       async () =>
-        new Response('<main id="error">Account not found</main>', {
+        new Response('{"next":"/account"}', {
+          headers: { 'Content-Type': 'application/json' },
+          status: 300,
+          statusText: 'Multiple Choices',
+        }),
+    )
+
+    let app = run({ loadModule: mock.fn() })
+    let reportedError: unknown
+    app.addEventListener('error', (event) => {
+      reportedError = event.error
+    })
+
+    try {
+      await app.ready()
+      app.frames.top.src = '/choices'
+
+      await expect(app.frames.top.reload()).rejects.toThrow(
+        'Failed to resolve frame: 300 Multiple Choices',
+      )
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(reportedError).toBeInstanceOf(Error)
+      expect((reportedError as Error).message).toBe('Failed to resolve frame: 300 Multiple Choices')
+      expect(document.getElementById('initial')?.textContent).toBe('Initial')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('renders 4xx HTML responses from the default resolver', async (t) => {
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          '<!DOCTYPE html><html><head></head><body><p role="alert">Name is required</p></body></html><!-- rmx:flush document -->',
+          {
+            headers: { 'Content-Type': 'Text/HTML; charset=utf-8' },
+            status: 422,
+            statusText: 'Unprocessable Content',
+          },
+        ),
+    )
+
+    let app = run({ loadModule: mock.fn() })
+    await app.ready()
+    app.frames.top.src = '/account'
+
+    try {
+      await reloadFrameForNavigation(app.frames.top, {
+        formData: new FormData(),
+        method: 'post',
+      }).finished
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('[role="alert"]')?.textContent).toBe('Name is required')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('rejects non-HTML 4xx responses from the default resolver', async (t) => {
+    document.body.innerHTML = '<main id="initial">Initial</main>'
+    let unhandledRejections: unknown[] = []
+    let onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault()
+      unhandledRejections.push(event.reason)
+    }
+    window.addEventListener('unhandledrejection', onUnhandledRejection)
+    t.after(() => window.removeEventListener('unhandledrejection', onUnhandledRejection))
+
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response('Not Found', {
+          headers: { 'Content-Type': 'text/plain' },
           status: 404,
           statusText: 'Not Found',
         }),
@@ -242,10 +444,50 @@ describe('run', () => {
       await expect(app.frames.top.reload()).rejects.toThrow(
         'Failed to resolve frame: 404 Not Found',
       )
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(unhandledRejections).toEqual([])
+      expect(reportedError).toBeInstanceOf(Error)
+      expect((reportedError as Error).message).toBe('Failed to resolve frame: 404 Not Found')
+      expect(document.getElementById('initial')?.textContent).toBe('Initial')
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('rejects 5xx HTML responses from the default resolver', async (t) => {
+    document.body.innerHTML = '<main id="initial">Initial</main>'
+    let fetchMock = t.mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response('<main id="error">Internal Server Error</main>', {
+          headers: { 'Content-Type': 'text/html' },
+          status: 500,
+          statusText: 'Internal Server Error',
+        }),
+    )
+
+    let app = run({ loadModule: mock.fn() })
+    let reportedError: unknown
+    app.addEventListener('error', (event) => {
+      reportedError = event.error
+    })
+
+    try {
+      await app.ready()
+      app.frames.top.src = '/account'
+
+      await expect(app.frames.top.reload()).rejects.toThrow(
+        'Failed to resolve frame: 500 Internal Server Error',
+      )
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
       expect(reportedError).toBeInstanceOf(Error)
-      expect((reportedError as Error).message).toBe('Failed to resolve frame: 404 Not Found')
+      expect((reportedError as Error).message).toBe(
+        'Failed to resolve frame: 500 Internal Server Error',
+      )
       expect(document.getElementById('initial')?.textContent).toBe('Initial')
       expect(document.getElementById('error')).toBeNull()
     } finally {
@@ -275,7 +517,7 @@ describe('run', () => {
         encType: 'application/x-www-form-urlencoded',
         formData,
         method: 'post',
-      })
+      }).finished
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
       let [, init] = fetchMock.mock.calls[0]!.arguments
@@ -309,7 +551,7 @@ describe('run', () => {
         encType: 'text/plain',
         formData,
         method: 'post',
-      })
+      }).finished
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
       let [, init] = fetchMock.mock.calls[0]!.arguments
@@ -605,6 +847,60 @@ describe('run', () => {
 
     expect(toggleClickCount).toBe(2)
     expectBodyHtml('<button id="bare-button" type="button">Bare</button>')
+
+    app.dispose()
+  })
+
+  it('does not hydrate imported client entries through their parent boundary', async () => {
+    let clicks = 0
+    let updateOuter = () => {}
+
+    let Inner = clientEntry('/inner.js#Inner', function Inner() {
+      return () => (
+        <button
+          mix={[
+            on('click', () => {
+              clicks++
+            }),
+          ]}
+        >
+          Inner
+        </button>
+      )
+    })
+
+    let Outer = clientEntry('/outer.js#Outer', function Outer(handle: Handle) {
+      updateOuter = () => {
+        void handle.update()
+      }
+      return () => (
+        <section>
+          <Inner />
+        </section>
+      )
+    })
+
+    document.body.innerHTML = await drain(renderToStream(<Outer />))
+
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/outer.js' && exportName === 'Outer') return Outer
+        if (moduleUrl === '/inner.js' && exportName === 'Inner') return Inner
+        throw new Error(`Unexpected client entry: ${moduleUrl}#${exportName}`)
+      },
+    })
+    await app.ready()
+
+    let button = document.querySelector('button')
+    invariant(button)
+
+    button.click()
+    expect(clicks).toBe(1)
+
+    updateOuter()
+    app.flush()
+    button.click()
+    expect(clicks).toBe(2)
 
     app.dispose()
   })
@@ -1112,11 +1408,13 @@ describe('run', () => {
     let aSelector = findClassByPrefix(document, 'entry-a')
     invariant(aSelector, 'expected SSR markup to carry an rmxc-* class for entry-a')
 
+    let [bModuleRequested, markBModuleRequested] = withResolvers<void>()
     let [bModuleGate, allowBModule] = withResolvers<void>()
     let app = run({
       async loadModule(moduleUrl, exportName) {
         if (moduleUrl === '/js/entry-a.js' && exportName === 'EntryA') return EntryA
         if (moduleUrl === '/js/entry-b.js' && exportName === 'EntryB') {
+          markBModuleRequested()
           await bModuleGate
           return EntryB
         }
@@ -1135,7 +1433,11 @@ describe('run', () => {
     // before hydration makes it interactive.
     let topFrame = app.frames.top
     topFrame.src = '/b'
-    await topFrame.reload()
+    let reloadSettled = false
+    let reloadPromise = topFrame.reload().then(() => {
+      reloadSettled = true
+    })
+    await bModuleRequested
 
     // Pull EntryB's hashed selector from the SSR markup that replaceServerStyles
     // just adopted into adoptedStyleSheets.
@@ -1147,10 +1449,11 @@ describe('run', () => {
     expect(document.getElementById('entry-a')).toBeNull()
     expect(document.getElementById('entry-b')).not.toBeNull()
     expect(rulePresent(bSelectorFromB)).toBe(true)
+    expect(reloadSettled).toBe(false)
 
     // Allow the module load to finish and hydrate the destination SSR.
     allowBModule()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await reloadPromise
 
     expect(document.getElementById('entry-a')).toBeNull()
     expect(document.getElementById('entry-b')).not.toBeNull()
@@ -1388,7 +1691,10 @@ describe('run', () => {
 
   it('shows updated SSR when reloading an entry whose initial module is still loading', async () => {
     let reloadPromise: Promise<AbortSignal> | undefined
+    let markFastHydrated: (() => void) | undefined
     let Fast = clientEntry('/js/partial-fast.js#Fast', function Fast(handle: Handle) {
+      markFastHydrated?.()
+      markFastHydrated = undefined
       return () => (
         <button
           id="partial-fast"
@@ -1424,6 +1730,8 @@ describe('run', () => {
     )
     document.documentElement.innerHTML = initialDocument.documentElement.innerHTML
 
+    let [fastHydrated, resolveFastHydrated] = withResolvers<void>()
+    markFastHydrated = resolveFastHydrated
     let [slowModulePromise, resolveSlowModule] = withResolvers<Function>()
     let slowLoadCount = 0
     let app = run({
@@ -1442,7 +1750,7 @@ describe('run', () => {
     })
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 0))
+      await fastHydrated
 
       let fastButton = document.getElementById('partial-fast')
       invariant(fastButton instanceof HTMLButtonElement)
@@ -1450,18 +1758,27 @@ describe('run', () => {
       invariant(initialSlow instanceof HTMLParagraphElement)
 
       app.frames.top.src = '/reloaded'
+      let reloadedSlowReady = waitForElement(
+        '#partial-slow',
+        (element) => element !== initialSlow && element.textContent === 'Reloaded',
+      )
       fastButton.click()
       invariant(reloadPromise)
-      await reloadPromise
+      let reloadSettled = false
+      void reloadPromise.then(() => {
+        reloadSettled = true
+      })
+      await reloadedSlowReady
 
       let reloadedSlow = document.getElementById('partial-slow')
       invariant(reloadedSlow instanceof HTMLParagraphElement)
       expect(reloadedSlow).not.toBe(initialSlow)
       expect(reloadedSlow.textContent).toBe('Reloaded')
       expect(slowLoadCount).toBe(1)
+      expect(reloadSettled).toBe(false)
 
       resolveSlowModule(Slow)
-      await app.ready()
+      await Promise.all([reloadPromise, app.ready()])
       expect(document.getElementById('partial-slow')?.textContent).toBe('Reloaded')
     } finally {
       app.dispose()
@@ -1517,17 +1834,26 @@ describe('run', () => {
       invariant(targetFrame)
 
       targetFrame.src = '/reloaded'
-      await targetFrame.reload()
+      let reloadedSlowReady = waitForElement(
+        '#named-partial-slow',
+        (element) => element !== initialSlow && element.textContent === 'Reloaded',
+      )
+      let reloadSettled = false
+      let reloadPromise = targetFrame.reload().then(() => {
+        reloadSettled = true
+      })
+      await reloadedSlowReady
 
       let reloadedSlow = document.getElementById('named-partial-slow')
       invariant(reloadedSlow instanceof HTMLParagraphElement)
       expect(reloadedSlow).not.toBe(initialSlow)
       expect(reloadedSlow.textContent).toBe('Reloaded')
       expect(slowLoadCount).toBe(1)
+      expect(reloadSettled).toBe(false)
 
       let setupCountBeforeHydration = entrySetupCount
       resolveSlowModule(Slow)
-      await new Promise((resolve) => setTimeout(resolve, 0))
+      await reloadPromise
 
       expect(document.getElementById('named-partial-slow')?.textContent).toBe('Reloaded')
       expect(entrySetupCount).toBe(setupCountBeforeHydration + 1)
@@ -2167,6 +2493,70 @@ describe('run', () => {
     clientFrame.dispose()
   })
 
+  it('returns undefined when an internal named frame lookup misses', async () => {
+    document.body.innerHTML = await drain(renderToStream(<main />))
+
+    let app = run({ loadModule: mock.fn() })
+
+    try {
+      await app.ready()
+      expect(getNamedFrame('missing-frame')).toBeUndefined()
+    } finally {
+      app.dispose()
+    }
+  })
+
+  it('restores the previous named frame when the latest duplicate unmounts', async () => {
+    let showLatest = true
+    let getDuplicateFrame: undefined | (() => ReturnType<Handle['frames']['get']>)
+    let removeLatestFrame: undefined | (() => Promise<AbortSignal>)
+
+    let DuplicateFrames = clientEntry(
+      '/assets/duplicate-frames.js#DuplicateFrames',
+      function DuplicateFrames(handle: Handle) {
+        getDuplicateFrame = () => handle.frames.get('duplicate')
+        removeLatestFrame = () => {
+          showLatest = false
+          return handle.update()
+        }
+
+        return () => (
+          <>
+            <Frame name="duplicate" src="/first" />
+            {showLatest ? <Frame name="duplicate" src="/latest" /> : null}
+          </>
+        )
+      },
+    )
+
+    let resolveFrame = (src: string) => `<p>${src}</p>`
+    let html = await drain(renderToStream(<DuplicateFrames />, { resolveFrame }))
+    document.body.innerHTML = html
+
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/assets/duplicate-frames.js' && exportName === 'DuplicateFrames') {
+          return DuplicateFrames
+        }
+        throw new Error(`Unexpected module: ${moduleUrl}#${exportName}`)
+      },
+      resolveFrame,
+    })
+
+    try {
+      await app.ready()
+      invariant(getDuplicateFrame)
+      invariant(removeLatestFrame)
+      expect(getDuplicateFrame()?.src).toBe('/latest')
+
+      await removeLatestFrame()
+
+      expect(getDuplicateFrame()?.src).toBe('/first')
+    } finally {
+      app.dispose()
+    }
+  })
+
   it('exposes the root frame as handle.frames.top', async () => {
     let assertTopFrame: undefined | (() => void)
 
@@ -2235,7 +2625,7 @@ describe('run', () => {
     expect(fixture.requests).toEqual([{ src: destinationUrl, target: undefined }])
   })
 
-  it('reloads only the target frame using the public destination without rmx-src', async (t) => {
+  it('reloads only the target frame using the public destination without data-rmx-src', async (t) => {
     let fixture = await setupFrameNavigationTest(t)
     let destinationUrl = new URL('/destination', window.location.href).href
 
@@ -2306,6 +2696,139 @@ describe('run', () => {
       { src: firstTargetSrc, target: 'target' },
       { src: secondTargetSrc, target: 'target' },
     ])
+  })
+
+  it('restores traversal scroll after a preserved entry resolves a blocking frame', async (t) => {
+    let initialUrl = window.location.href
+    let initialEntryKey = window.navigation.currentEntry?.key
+    let listUrl = new URL('/scroll-list', initialUrl).href
+    let detailUrl = new URL('/scroll-detail', initialUrl).href
+    window.history.replaceState(null, '', listUrl)
+
+    let StoreEntry = clientEntry(
+      '/js/scroll-store.js#ScrollStore',
+      function ScrollStore(handle: Handle<{ variant: 'list' | 'detail' }>) {
+        let showItems = false
+
+        return () =>
+          handle.props.variant === 'list' ? (
+            <main id="scroll-list-page">
+              <button
+                id="show-scroll-list-items"
+                type="button"
+                mix={on('click', () => {
+                  showItems = true
+                  handle.update()
+                })}
+              >
+                Show list items
+              </button>
+              {showItems ? <Frame src="/list-items" /> : <p>List items hidden</p>}
+            </main>
+          ) : (
+            <main id="scroll-detail-page" style={{ display: 'block', height: '1000px' }}>
+              Detail
+            </main>
+          )
+      },
+    )
+
+    async function renderStoreDocument(variant: 'list' | 'detail') {
+      return await drainWithProtocol(
+        renderToStream(
+          <html>
+            <head />
+            <body>
+              <StoreEntry variant={variant} />
+            </body>
+          </html>,
+        ),
+      )
+    }
+
+    let initialDocument = new DOMParser().parseFromString(
+      await renderStoreDocument('list'),
+      'text/html',
+    )
+    document.documentElement.innerHTML = initialDocument.documentElement.innerHTML
+
+    let listItemsContent = '<div id="scroll-list-items" style="height:4000px"></div>'
+    let [deferredListItems, resolveDeferredListItems] = withResolvers<string>()
+    let [deferredListItemsRequested, markDeferredListItemsRequested] = withResolvers<void>()
+    let listItemsRequestCount = 0
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/js/scroll-store.js' && exportName === 'ScrollStore') return StoreEntry
+        throw new Error(`Unexpected module: ${moduleUrl}#${exportName}`)
+      },
+      async resolveFrame(src: string) {
+        let pathname = new URL(src, window.location.href).pathname
+        if (pathname === '/scroll-list') return await renderStoreDocument('list')
+        if (pathname === '/scroll-detail') return await renderStoreDocument('detail')
+        if (pathname === '/list-items') {
+          listItemsRequestCount++
+          if (listItemsRequestCount === 1) return listItemsContent
+          markDeferredListItemsRequested()
+          return await deferredListItems
+        }
+        throw new Error(`Unexpected frame src: ${src}`)
+      },
+    })
+
+    t.after(async () => {
+      resolveDeferredListItems(listItemsContent)
+      if (initialEntryKey && window.navigation.currentEntry?.key !== initialEntryKey) {
+        await window.navigation.traverseTo(initialEntryKey).finished
+      }
+      app.dispose()
+      window.history.replaceState(null, '', initialUrl)
+      window.scrollTo(0, 0)
+    })
+
+    await app.ready()
+    let initialListItems = waitForElement('#scroll-list-items')
+    let showItemsButton = document.getElementById('show-scroll-list-items')
+    invariant(showItemsButton instanceof HTMLButtonElement)
+    showItemsButton.click()
+    app.flush()
+    await initialListItems
+
+    window.scrollTo(0, 2500)
+    expect(window.scrollY).toBe(2500)
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+
+    await navigate(detailUrl)
+    expect(document.getElementById('scroll-detail-page')?.textContent).toContain('Detail')
+
+    let didScroll = false
+    window.navigation.addEventListener(
+      'navigate',
+      (event) => {
+        let scroll = event.scroll.bind(event)
+        Object.defineProperty(event, 'scroll', {
+          value() {
+            didScroll = true
+            scroll()
+          },
+        })
+      },
+      { once: true },
+    )
+
+    let backNavigation = window.navigation.back().finished
+    await deferredListItemsRequested
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    )
+
+    expect(didScroll).toBe(false)
+
+    resolveDeferredListItems(listItemsContent)
+    await backNavigation
+
+    expect(didScroll).toBe(true)
+    expect(document.getElementById('scroll-list-items')).not.toBe(null)
+    expect(window.scrollY).toBe(2500)
   })
 
   it('dispatches reloadStart and reloadComplete events for handle.frame and handle.frames.get(name)', async () => {
@@ -3354,6 +3877,245 @@ describe('run', () => {
     expect(button.textContent).toBe('Count: 11')
 
     clientFrame.dispose()
+  })
+
+  it('preserves parent context for client entries rendered by a frame', async () => {
+    let contextEvents = 0
+
+    let ContextProvider = clientEntry(
+      '/js/context-provider.js#ContextProvider',
+      function ContextProvider(handle: Handle) {
+        let context = new EventTarget()
+        context.addEventListener('action', () => {
+          contextEvents++
+        })
+        handle.context.set(context)
+
+        return () => <Frame name="context-frame" src="/context-frame" />
+      },
+    )
+
+    let FrameEntry = clientEntry(
+      '/js/frame-entry.js#FrameEntry',
+      function FrameEntry(handle: Handle) {
+        return () => (
+          <button
+            id="context-action"
+            mix={[
+              on('click', () => {
+                handle.context.get(ContextProvider)?.dispatchEvent(new Event('action'))
+              }),
+            ]}
+          >
+            Dispatch context event
+          </button>
+        )
+      },
+    )
+
+    async function renderFrameEntry(): Promise<string> {
+      return await renderFrameContent(<FrameEntry />)
+    }
+
+    document.body.innerHTML = await drain(
+      renderToStream(<ContextProvider />, {
+        resolveFrame: renderFrameEntry,
+      }),
+    )
+    contextEvents = 0
+
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/js/context-provider.js' && exportName === 'ContextProvider') {
+          return ContextProvider
+        }
+        if (moduleUrl === '/js/frame-entry.js' && exportName === 'FrameEntry') {
+          return FrameEntry
+        }
+        throw new Error(`Unexpected module: ${moduleUrl}#${exportName}`)
+      },
+      resolveFrame: renderFrameEntry,
+    })
+
+    await app.ready()
+
+    let action = document.getElementById('context-action')
+    invariant(action)
+    action.click()
+    expect(contextEvents).toBe(1)
+
+    let contextFrame = app.frames.get('context-frame')
+    invariant(contextFrame)
+    await contextFrame.reload()
+
+    action = document.getElementById('context-action')
+    invariant(action)
+    action.click()
+    expect(contextEvents).toBe(2)
+
+    app.dispose()
+  })
+
+  it('preserves setup-time context when a frame provider module loads after its consumer', async (t) => {
+    let contextEvents = 0
+    let independentClicks = 0
+    let ContextProvider = clientEntry(
+      '/js/slow-context-provider.js#ContextProvider',
+      function ContextProvider(handle: Handle<Record<string, never>, EventTarget>) {
+        let context = new EventTarget()
+        context.addEventListener('action', () => {
+          contextEvents++
+        })
+        handle.context.set(context)
+        return () => (
+          <section>
+            <Frame src="/context-frame" />
+          </section>
+        )
+      },
+    )
+    let FrameEntry = clientEntry(
+      '/js/setup-context-entry.js#FrameEntry',
+      function FrameEntry(handle: Handle) {
+        let context = handle.context.get(ContextProvider)
+        return () => (
+          <button
+            id="setup-context-action"
+            mix={on('click', () => context?.dispatchEvent(new Event('action')))}
+          >
+            Dispatch context event
+          </button>
+        )
+      },
+    )
+
+    let IndependentEntry = clientEntry(
+      '/js/independent.js#IndependentEntry',
+      function IndependentEntry() {
+        return () => (
+          <button
+            id="independent-action"
+            mix={on('click', () => {
+              independentClicks++
+            })}
+          >
+            Independent action
+          </button>
+        )
+      },
+    )
+
+    document.body.innerHTML = await drain(
+      renderToStream(
+        <>
+          <ContextProvider />
+          <Frame src="/independent-frame" />
+        </>,
+        {
+          resolveFrame(src) {
+            if (src === '/context-frame') return renderFrameContent(<FrameEntry />)
+            if (src === '/independent-frame') return renderFrameContent(<IndependentEntry />)
+            throw new Error(`Unexpected frame src: ${src}`)
+          },
+        },
+      ),
+    )
+
+    let [providerModule, resolveProviderModule] = withResolvers<typeof ContextProvider>()
+    let [providerRequested, markProviderRequested] = withResolvers<void>()
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/js/slow-context-provider.js' && exportName === 'ContextProvider') {
+          markProviderRequested()
+          return providerModule
+        }
+        if (moduleUrl === '/js/setup-context-entry.js' && exportName === 'FrameEntry') {
+          return FrameEntry
+        }
+        if (moduleUrl === '/js/independent.js' && exportName === 'IndependentEntry') {
+          return IndependentEntry
+        }
+        throw new Error(`Unexpected module: ${moduleUrl}#${exportName}`)
+      },
+    })
+    t.after(() => app.dispose())
+
+    await providerRequested
+    // Let the immediately available consumer hydrate while the provider import is pending.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    let independentAction = document.getElementById('independent-action')
+    invariant(independentAction instanceof HTMLButtonElement)
+    independentAction.click()
+    expect(independentClicks).toBe(1)
+
+    resolveProviderModule(ContextProvider)
+    await app.ready()
+
+    let action = document.getElementById('setup-context-action')
+    invariant(action instanceof HTMLButtonElement)
+    action.click()
+    expect(contextEvents).toBe(1)
+  })
+
+  it('hydrates nested frame content when its owning client entry module is already cached', async (t) => {
+    let clicks = 0
+    let FrameOwner = clientEntry(
+      '/js/cached-frame-owner.js#FrameOwner',
+      function FrameOwner(handle: Handle<{ src: string }, string>) {
+        handle.context.set(handle.props.src)
+        return () => <Frame src={handle.props.src} />
+      },
+    )
+    let FrameButton = clientEntry(
+      '/js/frame-button.js#FrameButton',
+      function FrameButton(handle: Handle) {
+        let src = handle.context.get(FrameOwner)
+        return () => (
+          <button
+            id="cached-frame-button"
+            mix={on('click', () => {
+              clicks++
+            })}
+          >
+            {src}
+          </button>
+        )
+      },
+    )
+
+    async function resolveFrame(src: string): Promise<string> {
+      if (src === '/outer') {
+        return await drain(renderToStream(<FrameOwner src="/inner" />, { resolveFrame }))
+      }
+      if (src === '/inner') return await renderFrameContent(<FrameButton />)
+      throw new Error(`Unexpected frame src: ${src}`)
+    }
+
+    document.body.innerHTML = await drain(
+      renderToStream(<FrameOwner src="/outer" />, { resolveFrame }),
+    )
+
+    let app = run({
+      loadModule(moduleUrl, exportName) {
+        if (moduleUrl === '/js/cached-frame-owner.js' && exportName === 'FrameOwner') {
+          return FrameOwner
+        }
+        if (moduleUrl === '/js/frame-button.js' && exportName === 'FrameButton') {
+          return FrameButton
+        }
+        throw new Error(`Unexpected module: ${moduleUrl}#${exportName}`)
+      },
+      resolveFrame,
+    })
+    t.after(() => app.dispose())
+
+    await app.ready()
+
+    let button = document.getElementById('cached-frame-button')
+    invariant(button instanceof HTMLButtonElement)
+    expect(button.textContent).toBe('/inner')
+    button.click()
+    expect(clicks).toBe(1)
   })
 
   it('deeply nested frames resolve independently at each level', async () => {

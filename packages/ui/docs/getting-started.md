@@ -29,6 +29,9 @@ root.render(<App />)
 The `createRoot` function takes a DOM element (or `document.body`) and returns a root object with a `render` method. You can call `render` multiple times to update the app:
 
 ```tsx
+import { createRoot, on } from 'remix/ui'
+import type { Handle } from 'remix/ui'
+
 function App(handle: Handle) {
   let count = 0
 
@@ -58,8 +61,8 @@ root.render(<App />)
 The root object provides several methods:
 
 - **`render(node)`** - Renders a component tree into the root container
-- **`flush()`** - Synchronously flushes all pending updates and tasks
-- **`dispose()`** - Removes the component tree and cleans up
+- **`flush()`** - Synchronously drains pending DOM work and tasks. It does not wait for promises, frame fetches, or deferred removal callbacks
+- **`dispose()`** - Removes the component tree and releases root listeners and resources. Exit mixins can defer host removal until their teardown callbacks settle
 
 ```tsx
 let root = createRoot(document.body)
@@ -74,14 +77,17 @@ root.flush()
 root.dispose()
 ```
 
+For browser tests, prefer [`render()` from `remix/ui/test`](https://github.com/remix-run/remix/blob/main/packages/ui/src/test/README.md), which provides `act()` and cleanup around a root.
+
 ## Server-Rendered App
 
-For a server-rendered app, define your page as a component, render it with `renderToStream`, and hydrate client entries on the client:
+For a server-rendered app, define your page as a component, install the standard render middleware, and hydrate client entries on the client:
 
 ### Server
 
 ```tsx
-import { renderToStream } from 'remix/ui/server'
+import { render } from 'remix/middleware/render'
+import { createRouter } from 'remix/router'
 import { Frame } from 'remix/ui'
 import { Counter } from './assets/counter.tsx'
 
@@ -90,7 +96,7 @@ function App() {
     <html>
       <head>
         <title>My App</title>
-        <script async type="module" src="/assets/entry.js" />
+        <script type="module" src="/assets/entry.js" />
       </head>
       <body>
         <h1>Hello</h1>
@@ -101,13 +107,10 @@ function App() {
   )
 }
 
-let stream = renderToStream(<App />, {
-  resolveFrame: (src) => fetchFrameHtml(src),
-})
+let router = createRouter({ middleware: [render()] })
 
-return new Response(stream, {
-  headers: { 'Content-Type': 'text/html; charset=utf-8' },
-})
+router.get('/', (context) => context.render(<App />))
+router.get('/sidebar', (context) => context.render(<nav>Sidebar</nav>))
 ```
 
 ### Client entry module
@@ -126,9 +129,11 @@ let app = run({
 await app.ready()
 ```
 
-`run()` fetches frame sources by default, including the submitted method, encoding, and `FormData`.
-Provide `resolveFrame` only when the app needs custom request headers, body encoding, or response
-policy. Add `rmx-document` to a link or form to leave its navigation to the browser.
+`run()` hydrates client entries and makes the current document the top-level frame. Eligible
+same-origin links and forms then soft-navigate by fetching HTML and updating that frame in place,
+even when the page does not render an explicit `<Frame>`. Provide `resolveFrame` only when the app
+needs custom request headers, body encoding, or response policy. See
+[Link navigation](./frames.md#link-navigation) for document-navigation effects and opt-outs.
 
 ### Client entry component
 
