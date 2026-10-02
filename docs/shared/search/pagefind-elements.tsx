@@ -1,6 +1,6 @@
 /// <reference path="./pagefind.d.ts" />
 
-import type { Handle } from 'remix/ui'
+import type { Handle } from 'remix/component'
 
 export interface PagefindElementsProps {
   baseUrl: string
@@ -19,7 +19,11 @@ export function PagefindElements(handle: Handle<PagefindElementsProps>) {
         base-url={handle.props.baseUrl}
         bundle-path={handle.props.bundlePath}
       ></pagefind-config>
-      <pagefind-modal data-key="pagefind-modal" rmx-preserve-dom reset-on-close></pagefind-modal>
+      <pagefind-modal
+        data-rmx-key="pagefind-modal"
+        data-rmx-preserve-dom
+        reset-on-close
+      ></pagefind-modal>
     </>
   )
 }

@@ -17,19 +17,21 @@ import type {
 import { getFingerprintRequestCacheControl, parseFingerprintSuffix } from './fingerprint.ts'
 import { createHmrClientSource } from './hmr.ts'
 import type { HmrPayload } from './hmr.ts'
-import { getInjectedPackageRouteConfigs } from './injected-packages.ts'
+import { getInjectedPackageMountConfigs } from './injected-packages.ts'
 import type { ModuleLoader } from './loaders.ts'
 import { normalizeFilePath, normalizePathname } from './paths.ts'
 import { compileRoutes } from './routes.ts'
 import type { CompiledRoutes } from './routes.ts'
 import { createResponseForScript, createScriptCompiler } from './scripts/compiler.ts'
-import type { ScriptHmrUpdate } from './scripts/compiler.ts'
+import type { ScriptHmrUpdate, ScriptImportMap } from './scripts/compiler.ts'
 import { supportedScriptExtensions } from './scripts/resolve.ts'
 import { createResponseForStyle, createStyleCompiler, isStyleFilePath } from './styles/compiler.ts'
 import { resolveScriptTarget, resolveStyleTarget } from './target.ts'
 import type { AssetTarget, ResolvedScriptTarget, ResolvedStyleTarget } from './target.ts'
 import { createAssetServerWatcher } from './watch.ts'
+import { createAssetInspector, type AssetDetails } from './inspection.ts'
 import type { AssetServerWatcher, ChokidarWatcher } from './watch.ts'
+import { getVirtualStoreMountConfigs } from './virtual-store.ts'
 
 interface AssetServerWatchOptions {
   /**
@@ -89,6 +91,18 @@ export type BrowserHmrChannelFactory = () =>
   | undefined
   | Promise<BrowserHmrChannel | undefined>
 
+/** Browser HMR integration options. */
+export interface BrowserHmrOptions {
+  /** Creates the channel that delivers browser HMR events. */
+  channel: BrowserHmrChannelFactory
+  /**
+   * Module specifier resolved relative to the asset server's root directory. It must point to a
+   * browser module exporting `importModule(specifier, parentUrl)` for evaluating JavaScript updates.
+   * The module and its dependencies must be allowed and reachable through configured mounts.
+   */
+  moduleImporter?: string
+}
+
 /**
  * Converts a watcher batch into ordered browser update or reload events.
  *
@@ -124,14 +138,12 @@ export type BrowserHmrFileEvent = {
  */
 export type BrowserHmrEvent =
   | {
+      /** Consumer-owned data keyed by a stable, versioned namespace. */
+      data: Record<string, BrowserHmrData>
       /** Absolute source file paths that triggered this update. */
       files?: string[]
-      /** Update time used to bypass browser module and stylesheet caches. */
-      timestamp: number
       /** Browser update event. */
       type: 'update'
-      /** Accepted JavaScript and CSS module updates for the browser to apply in place. */
-      updates: Extract<HmrPayload, { type: 'browser:update' }>['updates']
     }
   | {
       /** Absolute source file paths that could not be handled in place. */
@@ -140,16 +152,15 @@ export type BrowserHmrEvent =
       type: 'reload'
     }
 
-interface FingerprintOptions {
-  /**
-   * Per-build invalidation token that must change whenever fingerprinted asset URLs
-   * should be invalidated together.
-   */
-  buildId: string
-}
-
 type AssetSourceMaps = 'inline' | 'external'
 type AssetSourceMapSourcePaths = 'url' | 'absolute'
+type BrowserHmrData =
+  | null
+  | boolean
+  | number
+  | string
+  | BrowserHmrData[]
+  | { [key: string]: BrowserHmrData }
 
 interface AssetServerScriptOptions {
   /**
@@ -157,7 +168,7 @@ interface AssetServerScriptOptions {
    * `{ 'process.env.NODE_ENV': '"production"' }`
    */
   define?: Record<string, string>
-  /** Import specifiers to leave unrewritten (CDN URLs, import map entries, etc.) */
+  /** Import specifiers to treat as external dependencies (CDN URLs, import map entries, etc.) */
   external?: string[]
   /**
    * Synchronous loaders that post-process compiled JavaScript.
@@ -172,6 +183,10 @@ interface AssetServerScriptOptions {
 }
 
 const scriptExtensionSet = new Set<string>(supportedScriptExtensions)
+const defaultMounts = {
+  app: 'app',
+  npm: 'node_modules',
+} as const
 
 /**
  * Options used to construct an {@link AssetServer} via {@link createAssetServer}.
@@ -179,8 +194,14 @@ const scriptExtensionSet = new Set<string>(supportedScriptExtensions)
 export interface AssetServerOptions<transforms extends AssetRequestTransformMap = {}> {
   /** Public mount path for this asset server, e.g. `'/assets'`. */
   basePath: string
-  /** File patterns keyed by public URL patterns. */
-  fileMap: Readonly<Record<string, string>>
+  /**
+   * Directories to mount at public URL paths.
+   *
+   * Each key is a public URL path and its value is a directory relative to `rootDir`. Defaults to
+   * `{ app: 'app', npm: 'node_modules' }`. Public paths must not contain query strings, fragments,
+   * or encoded dot segments.
+   */
+  mounts?: Readonly<Record<string, string>>
   /**
    * Root directory used to resolve relative file paths. Defaults to `process.cwd()`.
    */
@@ -191,7 +212,7 @@ export interface AssetServerOptions<transforms extends AssetRequestTransformMap 
   allowFiles: readonly string[]
   /**
    * Exact package names whose files are allowed to be served. Dependencies and installed optional
-   * dependencies are allowed automatically. Package files must still match `fileMap`.
+   * dependencies are allowed automatically. Package files must still be within a configured mount.
    */
   allowPackages?: readonly string[]
   /**
@@ -199,12 +220,12 @@ export interface AssetServerOptions<transforms extends AssetRequestTransformMap 
    */
   denyFiles?: readonly string[]
   /**
-   * Controls optional source-based URL fingerprinting for rewritten asset URLs.
+   * Controls optional content-based URL fingerprinting for served asset URLs.
    *
    * When omitted, all served assets use stable non-fingerprinted URLs with `Cache-Control: no-cache`.
    * Cannot be used together with active watch mode. Set `watch: false` when fingerprinting.
    */
-  fingerprint?: FingerprintOptions
+  fingerprint?: boolean
   /**
    * Shared compatibility target for scripts and styles. Browser targets apply to both
    * pipelines, and `es` only affects scripts.
@@ -242,7 +263,7 @@ export interface AssetServerOptions<transforms extends AssetRequestTransformMap 
    * HMR requires `watch` to be enabled. The factory is called once for this asset server. Returning
    * `undefined` leaves HMR inactive; a returned channel is closed by `assetServer.close()`.
    */
-  hmr?: BrowserHmrChannelFactory
+  hmr?: BrowserHmrChannelFactory | BrowserHmrOptions
   /**
    * Enable filesystem-backed cache invalidation for long-lived server instances.
    * Enabled by default. Pass `true` to use the default watcher options, an options
@@ -272,6 +293,18 @@ export type AssetServerGetHrefOptions<transforms extends AssetRequestTransformMa
     }
 
 /**
+ * Metadata needed to render or load a script entry module.
+ */
+export interface ScriptEntry {
+  /** Public URL for the script entry module. */
+  href: string
+  /** Public URLs that should be emitted as `modulepreload` hints for this script graph. */
+  preloads: string[]
+  /** Import map entries required to resolve this script graph in the browser. */
+  importMap: ScriptImportMap
+}
+
+/**
  * Serves compiled scripts and styles for asset requests routed to it.
  * Construct with {@link createAssetServer}.
  */
@@ -286,9 +319,27 @@ export interface AssetServer<transforms extends AssetRequestTransformMap = {}> {
    */
   getHref(filePath: string, options?: AssetServerGetHrefOptions<transforms>): Promise<string>
   /**
+   * Returns the href, preload URLs, and import map for a script entry module.
+   */
+  getScriptEntry(filePath: string): Promise<ScriptEntry>
+  /**
    * Returns preload URLs for one or more served asset files, ordered shallowest-first.
    */
   getPreloads(filePath: string | readonly string[]): Promise<string[]>
+  /**
+   * Returns an import map for one or more script entry modules.
+   */
+  getImportMap(filePath: string | readonly string[]): Promise<ScriptImportMap>
+  /**
+   * Returns diagnostic details about one public asset URL or file path, including the matched mount
+   * roots, access rules, file type, and browser-reachability status.
+   */
+  getAssetDetails(input: string): Promise<AssetDetails>
+  /**
+   * Returns every file currently reachable through this asset server, sorted by public URL and
+   * then absolute file path.
+   */
+  getAssets(): Promise<AssetDetails[]>
   /**
    * Closes this server's filesystem watcher and browser HMR channel.
    *
@@ -301,17 +352,18 @@ type ResolvedAssetServerOptions<transforms extends AssetRequestTransformMap> = {
   allowFiles: readonly string[]
   allowPackages?: readonly string[]
   basePath: string
-  buildId?: string
   define?: Record<string, string>
   denyFiles?: readonly string[]
   external: string[]
   files: ResolvedAssetServerFilesOptions
   fingerprintAssets: boolean
   hmr: BrowserHmrChannelFactory | null
+  hmrModuleImporter: string | null
   minify: boolean
   loaders: readonly ModuleLoader[]
   onError: NonNullable<AssetServerOptions['onError']>
   rootDir: string
+  mounts: Readonly<Record<string, string>>
   routes: CompiledRoutes
   sourceMapSourcePaths: 'url' | 'absolute'
   sourceMaps?: 'inline' | 'external'
@@ -339,7 +391,7 @@ export function getInternalWatchTargets<transforms extends AssetRequestTransform
  * Create an asset server instance
  *
  * Compiles TypeScript/JavaScript scripts and CSS styles on demand with optional
- * source-based URL fingerprinting, caching, and configurable file mapping.
+ * content-based URL fingerprinting, caching, and configurable directory mounts.
  *
  * @param options Server configuration
  * @returns A {@link AssetServer} with `fetch()`, `getHref()`, and `getPreloads()` methods
@@ -348,9 +400,6 @@ export function getInternalWatchTargets<transforms extends AssetRequestTransform
  * ```ts
  * let assetServer = createAssetServer({
  *   basePath: '/assets',
- *   fileMap: {
- *     '/app/*path': 'app/*path',
- *   },
  *   allowFiles: ['app/routes.ts', 'app/**\/public/**'],
  *   allowPackages: ['remix'],
  *   denyFiles: ['app/**\/*.test.*'],
@@ -368,9 +417,16 @@ export function createAssetServer<const transforms extends AssetRequestTransform
     allowPackages: resolvedOptions.allowPackages,
     denyFiles: resolvedOptions.denyFiles,
     packageSearchRoots: hasPackages(resolvedOptions.allowPackages)
-      ? getPackageSearchRoots(options.fileMap, resolvedOptions.rootDir)
+      ? getPackageSearchRoots(resolvedOptions.mounts, resolvedOptions.rootDir)
       : undefined,
     rootDir: resolvedOptions.rootDir,
+  })
+  let assetInspector = createAssetInspector({
+    accessPolicy,
+    allowFiles: resolvedOptions.allowFiles,
+    fileExtensions: resolvedOptions.files.extensions,
+    rootDir: resolvedOptions.rootDir,
+    routes: resolvedOptions.routes,
   })
   let watcher: AssetServerWatcher | null = null
   let chokidarWatcher: ChokidarWatcher | null = null
@@ -392,8 +448,8 @@ export function createAssetServer<const transforms extends AssetRequestTransform
   })
   let sendHmrPayload = resolvedOptions.hmr ? createHmrPayloadSender() : null
   let hmrPathnames = getHmrPathnames(resolvedOptions.basePath)
+  let hmrDataKey = `remix/assets@1:${resolvedOptions.basePath}`
   let scriptCompiler = createScriptCompiler({
-    buildId: resolvedOptions.buildId,
     define: resolvedOptions.define,
     external: resolvedOptions.external,
     fingerprintAssets: resolvedOptions.fingerprintAssets,
@@ -425,7 +481,6 @@ export function createAssetServer<const transforms extends AssetRequestTransform
     watchMode: resolvedOptions.watchOptions !== null,
   })
   let styleCompiler = createStyleCompiler({
-    buildId: resolvedOptions.buildId,
     fingerprintAssets: resolvedOptions.fingerprintAssets,
     getServedFileUrl: (identityPath: string, options: { transform: readonly string[] | null }) => {
       if (!fileCompiler) {
@@ -477,8 +532,8 @@ export function createAssetServer<const transforms extends AssetRequestTransform
   })
   if (resolvedOptions.files.extensions.length > 0) {
     fileCompiler = createFileCompiler({
-      buildId: resolvedOptions.buildId,
       cache: resolvedOptions.files.cache,
+      cacheKey: resolvedOptions.files.cacheKey,
       extensions: resolvedOptions.files.extensions,
       fingerprintAssets: resolvedOptions.fingerprintAssets,
       globalTransforms: resolvedOptions.files.globalTransforms,
@@ -532,10 +587,10 @@ export function createAssetServer<const transforms extends AssetRequestTransform
     for (let event of events) {
       let normalizedFilePath = normalizeFilePath(event.filePath)
       let scriptUpdates = await scriptCompiler.classifyHmrFileEvent(normalizedFilePath, event.event)
-      let scriptPayload = createScriptHmrPayload(scriptUpdates)
+      let scriptPayload = await createScriptHmrPayloadWithImportMaps(scriptUpdates)
       if (scriptPayload) {
         browserHmrEvents.push(
-          createBrowserHmrEvent(scriptPayload, getScriptHmrUpdateFiles(scriptUpdates)),
+          createBrowserHmrEvent(scriptPayload, getScriptHmrUpdateFiles(scriptUpdates), hmrDataKey),
         )
       }
 
@@ -554,6 +609,7 @@ export function createAssetServer<const transforms extends AssetRequestTransform
               ],
             },
             [styleUpdate.filePath],
+            hmrDataKey,
           ),
         )
       }
@@ -562,6 +618,32 @@ export function createAssetServer<const transforms extends AssetRequestTransform
     }
 
     return browserHmrEvents
+
+    async function createScriptHmrPayloadWithImportMaps(
+      updates: ScriptHmrUpdate[],
+    ): Promise<Extract<HmrPayload, { type: 'browser:reload' | 'browser:update' }> | null> {
+      let payload = createScriptHmrPayload(updates)
+      if (!payload || payload.type === 'browser:reload') return payload
+
+      let acceptedUpdates = updates.filter((update) => update.accepted)
+      let importMaps = await Promise.all(
+        acceptedUpdates.map(async (update) => {
+          try {
+            return await scriptCompiler.getImportMap(update.acceptedFilePath)
+          } catch (error) {
+            if (!isAssetServerCompilationError(error)) throw error
+            return undefined
+          }
+        }),
+      )
+      return {
+        ...payload,
+        updates: payload.updates.map((update, index) => ({
+          ...update,
+          ...(importMaps[index] ? { importMap: importMaps[index] } : null),
+        })),
+      }
+    }
   }
 
   function updateBrowserHmrWatchedFiles(delta: BrowserHmrWatchedFileDelta): void {
@@ -575,6 +657,12 @@ export function createAssetServer<const transforms extends AssetRequestTransform
   }
 
   let assetServer: AssetServer<transforms> = {
+    getAssetDetails(input) {
+      return assetInspector.getAssetDetails(input)
+    },
+    getAssets() {
+      return assetInspector.getAssets()
+    },
     async fetch(request) {
       if (request.method !== 'GET' && request.method !== 'HEAD') return null
       let requestPathname = new URL(request.url).pathname
@@ -583,7 +671,13 @@ export function createAssetServer<const transforms extends AssetRequestTransform
         if (requestPathname === hmrPathnames.client) {
           let browserHmrChannel = await browserHmrChannelPromise
           assertBrowserEventUrl(browserHmrChannel?.url)
-          return createHmrClientResponse(browserHmrChannel.url, request.method)
+          return await createHmrClientResponse(
+            browserHmrChannel.url,
+            hmrDataKey,
+            resolvedOptions.hmrModuleImporter,
+            request.method,
+            scriptCompiler,
+          )
         }
       }
 
@@ -619,8 +713,10 @@ export function createAssetServer<const transforms extends AssetRequestTransform
           let compiledStyle = styleResult.style
 
           if (parsedRequestPathname.requestedFingerprint !== null) {
-            if (compiledStyle.fingerprint !== parsedRequestPathname.requestedFingerprint)
-              return null
+            let fingerprint = parsedRequestPathname.isSourceMapRequest
+              ? compiledStyle.sourceMap?.fingerprint
+              : compiledStyle.fingerprint
+            if (fingerprint !== parsedRequestPathname.requestedFingerprint) return null
           }
 
           return createResponseForStyle(compiledStyle, {
@@ -684,7 +780,10 @@ export function createAssetServer<const transforms extends AssetRequestTransform
         let compiledScript = scriptResult.script
 
         if (parsedRequestPathname.requestedFingerprint !== null) {
-          if (compiledScript.fingerprint !== parsedRequestPathname.requestedFingerprint) return null
+          let fingerprint = parsedRequestPathname.isSourceMapRequest
+            ? compiledScript.sourceMap?.fingerprint
+            : compiledScript.fingerprint
+          if (fingerprint !== parsedRequestPathname.requestedFingerprint) return null
         }
 
         return createResponseForScript(compiledScript, {
@@ -746,6 +845,15 @@ export function createAssetServer<const transforms extends AssetRequestTransform
       }
 
       return scriptCompiler.getHref(filePath)
+    },
+    async getScriptEntry(filePath) {
+      let [href, preloads, importMap] = await Promise.all([
+        assetServer.getHref(filePath),
+        assetServer.getPreloads(filePath),
+        assetServer.getImportMap(filePath),
+      ])
+
+      return { href, preloads, importMap }
     },
     async getPreloads(filePath) {
       let filePaths = Array.isArray(filePath) ? filePath : [filePath]
@@ -810,6 +918,26 @@ export function createAssetServer<const transforms extends AssetRequestTransform
       })
 
       return mergePreloadLayers(await Promise.all(preloadLayerGroupPromises))
+    },
+    async getImportMap(filePath) {
+      let filePaths = Array.isArray(filePath) ? [...filePath] : [filePath]
+      for (let nextFilePath of filePaths) {
+        let typeCheckFilePath = stripFilePathUrlSuffix(nextFilePath)
+        if (!isScriptFilePath(typeCheckFilePath)) {
+          throw new TypeError(
+            `assetServer.getImportMap() only supports script files: ${nextFilePath}`,
+          )
+        }
+      }
+
+      if (resolvedOptions.hmrModuleImporter) {
+        let moduleImporter = await scriptCompiler.resolveSpecifierFromRoot(
+          resolvedOptions.hmrModuleImporter,
+        )
+        filePaths.push(moduleImporter.identityPath)
+      }
+
+      return scriptCompiler.getImportMap(filePaths)
     },
     async close() {
       if (closed) return
@@ -876,13 +1004,27 @@ function getHmrPathnames(basePath: string): { client: string; events: string } {
   }
 }
 
-function createHmrClientResponse(eventPathname: string, method: string): Response {
-  return new Response(method === 'HEAD' ? null : createHmrClientSource({ eventPathname }), {
-    headers: {
-      'Cache-Control': 'no-cache',
-      'Content-Type': 'application/javascript; charset=utf-8',
+async function createHmrClientResponse(
+  eventPathname: string,
+  dataKey: string,
+  moduleImporter: string | null,
+  method: string,
+  scriptCompiler: ReturnType<typeof createScriptCompiler>,
+): Promise<Response> {
+  let moduleImporterHref = moduleImporter
+    ? (await scriptCompiler.resolveSpecifierFromRoot(moduleImporter)).href
+    : null
+  return new Response(
+    method === 'HEAD'
+      ? null
+      : createHmrClientSource({ dataKey, eventPathname, moduleImporter: moduleImporterHref }),
+    {
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/javascript; charset=utf-8',
+      },
     },
-  })
+  )
 }
 
 function assertBrowserEventUrl(url: string | undefined): asserts url is string {
@@ -898,6 +1040,7 @@ function createHmrPayloadSender(): (payload: HmrPayload) => void {
 function createBrowserHmrEvent(
   payload: Extract<HmrPayload, { type: 'browser:reload' | 'browser:update' }>,
   files: readonly string[],
+  dataKey: string,
 ): BrowserHmrEvent {
   if (payload.type === 'browser:reload') {
     return {
@@ -907,10 +1050,14 @@ function createBrowserHmrEvent(
   }
 
   return {
+    data: {
+      [dataKey]: {
+        timestamp: payload.timestamp,
+        updates: payload.updates,
+      },
+    },
     ...(files.length === 0 ? {} : { files: [...files] }),
-    timestamp: payload.timestamp,
     type: 'update',
-    updates: payload.updates,
   }
 }
 
@@ -936,7 +1083,9 @@ export function createScriptHmrPayload(
     timestamp,
     type: 'browser:update',
     updates: acceptedUpdates.map((update) => ({
-      ...(update.acceptedPath === update.path ? {} : { acceptedPath: update.acceptedPath }),
+      ...(update.acceptedUrlPathname === update.path
+        ? {}
+        : { acceptedPath: update.acceptedUrlPathname }),
       path: update.path,
       type: 'js',
     })),
@@ -1000,37 +1149,43 @@ function resolveAssetServerOptions<transforms extends AssetRequestTransformMap>(
   let rootDir = normalizeFilePath(fs.realpathSync(path.resolve(options.rootDir ?? process.cwd())))
   let basePath = normalizeBasePath(options.basePath)
   let scriptOptions = options.scripts ?? {}
-  let fingerprintOptions = normalizeFingerprintOptions({
+  let fingerprintAssets = normalizeFingerprintOptions({
     fingerprint: options.fingerprint,
     watch: options.watch,
   })
   let watchOptions = normalizeWatchOptions(options.watch)
-  let hmrFactory = normalizeHmrFactory(options.hmr)
+  let hmr = normalizeHmrOptions(options.hmr)
+  let mounts = options.mounts ?? defaultMounts
 
-  if (hmrFactory && watchOptions === null) {
+  if (hmr.channel && watchOptions === null) {
     throw new TypeError('hmr requires watch mode')
+  }
+  if (Object.keys(mounts).length === 0) {
+    throw new TypeError('mounts must include at least one entry')
   }
   return {
     allowFiles: options.allowFiles,
     allowPackages: options.allowPackages,
     basePath,
-    buildId: fingerprintOptions.buildId,
     define: scriptOptions.define,
     denyFiles: options.denyFiles,
     external: scriptOptions.external ?? [],
     files: normalizeFilesOptions(options.files),
-    fingerprintAssets: fingerprintOptions.enabled,
-    hmr: hmrFactory,
+    fingerprintAssets,
+    hmr: hmr.channel,
+    hmrModuleImporter: hmr.moduleImporter,
     minify: options.minify ?? false,
+    mounts,
     loaders: scriptOptions.loaders ?? [],
     onError: options.onError ?? defaultErrorHandler,
     rootDir,
     routes: compileRoutes(basePath, [
       {
-        fileMap: options.fileMap,
+        mounts,
         rootDir,
       },
-      ...getInjectedPackageRouteConfigs(),
+      ...getInjectedPackageMountConfigs(),
+      ...getVirtualStoreMountConfigs({ mounts, rootDir }),
     ]),
     sourceMapSourcePaths: options.sourceMapSourcePaths ?? 'url',
     sourceMaps: options.sourceMaps,
@@ -1040,14 +1195,22 @@ function resolveAssetServerOptions<transforms extends AssetRequestTransformMap>(
   }
 }
 
-function normalizeHmrFactory(factory: AssetServerOptions['hmr']): BrowserHmrChannelFactory | null {
-  if (factory === undefined) return null
-
-  if (typeof factory !== 'function') {
-    throw new TypeError('hmr must be a function')
+function normalizeHmrOptions(options: AssetServerOptions['hmr']): {
+  channel: BrowserHmrChannelFactory | null
+  moduleImporter: string | null
+} {
+  if (options === undefined) return { channel: null, moduleImporter: null }
+  if (typeof options === 'function') return { channel: options, moduleImporter: null }
+  if (!options || typeof options !== 'object' || typeof options.channel !== 'function') {
+    throw new TypeError('hmr must be a function or an object with a channel function')
   }
-
-  return factory
+  if (
+    options.moduleImporter !== undefined &&
+    (typeof options.moduleImporter !== 'string' || options.moduleImporter.trim().length === 0)
+  ) {
+    throw new TypeError('hmr.moduleImporter must be a non-empty string')
+  }
+  return { channel: options.channel, moduleImporter: options.moduleImporter ?? null }
 }
 
 function createBrowserHmrChannel(
@@ -1108,37 +1271,20 @@ function normalizeBasePath(basePath: string): string {
 function normalizeFingerprintOptions(options: {
   fingerprint: AssetServerOptions['fingerprint']
   watch: AssetServerOptions['watch']
-}):
-  | {
-      enabled: false
-      buildId?: string
-    }
-  | {
-      enabled: true
-      buildId: string
-    } {
+}): boolean {
+  if (options.fingerprint !== undefined && typeof options.fingerprint !== 'boolean') {
+    throw new TypeError('fingerprint must be a boolean')
+  }
+
   if (!options.fingerprint) {
-    return {
-      enabled: false,
-    }
-  }
-
-  if (typeof options.fingerprint.buildId !== 'string') {
-    throw new TypeError('fingerprint.buildId must be a string')
-  }
-
-  if (options.fingerprint.buildId.length === 0) {
-    throw new TypeError('fingerprint.buildId must be a non-empty string')
+    return false
   }
 
   if (options.watch !== false) {
     throw new TypeError('fingerprint cannot be used with watch mode')
   }
 
-  return {
-    enabled: true,
-    buildId: options.fingerprint.buildId,
-  }
+  return true
 }
 
 function normalizeWatchOptions(
@@ -1154,19 +1300,10 @@ function hasPackages(packages: readonly string[] | undefined): boolean {
 }
 
 function getPackageSearchRoots(
-  fileMap: AssetServerOptions['fileMap'],
+  mounts: Readonly<Record<string, string>>,
   rootDir: string,
 ): readonly string[] {
-  return Object.values(fileMap).map((filePattern) =>
-    path.resolve(rootDir, getStaticFilePatternPrefix(filePattern)),
-  )
-}
-
-function getStaticFilePatternPrefix(filePattern: string): string {
-  let firstDynamicIndex = filePattern.search(/[*:]/)
-  let staticPrefix =
-    firstDynamicIndex === -1 ? filePattern : filePattern.slice(0, firstDynamicIndex)
-  return staticPrefix.replace(/[/\\]*$/, '')
+  return Object.values(mounts).map((fileRoot) => path.resolve(rootDir, fileRoot))
 }
 
 function parseAssetRequestPathname(
