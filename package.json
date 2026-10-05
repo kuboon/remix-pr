@@ -1,0 +1,14 @@
+{
+  "name": "remix-spa-client-entry-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@remix-run/component": "1.0.0",
+    "@remix-run/fetch-router": "1.0.0",
+    "@remix-run/spa": "1.0.0",
+    "esbuild": "^0.25.0"
+  }
+}
