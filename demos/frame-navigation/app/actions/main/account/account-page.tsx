@@ -1,5 +1,5 @@
-import type { Handle } from 'remix/ui'
-import { css, Frame } from 'remix/ui'
+import type { Handle } from 'remix/component'
+import { css, Frame } from 'remix/component'
 
 import type { Account } from '../../../data/account.ts'
 import { frames, routes } from '../../../routes.ts'
@@ -40,7 +40,7 @@ export function AccountPage(handle: Handle<AccountPageProps>) {
           </div>
           <a
             href={routes.main.account.edit.index.href()}
-            rmx-target={frames.account}
+            data-rmx-target={frames.account}
             mix={editLinkStyle}
           >
             Edit

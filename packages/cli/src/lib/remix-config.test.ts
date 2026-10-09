@@ -5,11 +5,80 @@ import { fileURLToPath } from 'node:url'
 import * as assert from '@remix-run/assert'
 import { describe, it } from '@remix-run/test'
 
-import { loadRemixConfig } from './remix-config.ts'
+import { loadConfig, loadRemixConfig } from './remix-config.ts'
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 
-describe('loadRemixConfig', () => {
+describe('Remix config loading', () => {
+  it('loads an explicit config file or searches upward from a directory', async () => {
+    let rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-discovery-'))
+    let nestedDir = path.join(rootDir, 'app', 'actions')
+    let configPath = path.join(rootDir, 'project.jsonc')
+
+    try {
+      await fs.mkdir(nestedDir, { recursive: true })
+      await fs.writeFile(path.join(rootDir, 'remix.json'), '{ "doctor": { "strict": true } }')
+      await fs.writeFile(configPath, '{ "doctor": { "strict": false } }')
+
+      assert.deepEqual(await loadConfig(nestedDir), { doctor: { strict: true } })
+      assert.deepEqual(await loadConfig(configPath), { doctor: { strict: false } })
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('parses asset configuration and resolves its root from the config file', async () => {
+    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-assets-'))
+
+    try {
+      await fs.writeFile(
+        path.join(cwd, 'remix.json'),
+        JSON.stringify({
+          assets: {
+            allowFiles: ['app/routes.ts', 'app/**/public/**'],
+            allowPackages: ['remix'],
+            basePath: '/assets',
+            denyFiles: ['app/**/*.test.*'],
+            mounts: { app: 'app' },
+            files: { extensions: ['.svg', '.png'] },
+            rootDir: '..',
+          },
+        }),
+      )
+
+      let config = await loadConfig(cwd)
+      assert.deepEqual(config.assets, {
+        allowFiles: ['app/routes.ts', 'app/**/public/**'],
+        allowPackages: ['remix'],
+        basePath: '/assets',
+        denyFiles: ['app/**/*.test.*'],
+        mounts: { app: 'app' },
+        files: { extensions: ['.svg', '.png'] },
+        rootDir: path.dirname(cwd),
+      })
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects incomplete asset configuration with a source location', async () => {
+    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-assets-invalid-'))
+
+    try {
+      await fs.writeFile(
+        path.join(cwd, 'remix.json'),
+        ['{', '  "assets": {', '    "basePath": "/assets"', '  }', '}'].join('\n'),
+      )
+
+      await assert.rejects(
+        () => loadConfig(cwd),
+        /Expected an array of strings at assets\.allowFiles/,
+      )
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('treats a missing default config as empty', async () => {
     let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-missing-default-'))
 
@@ -100,18 +169,70 @@ describe('loadRemixConfig', () => {
   })
 
   it('rejects unsupported database adapter types', async () => {
-    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-db-module-'))
+    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-db-unknown-'))
 
     try {
       await fs.writeFile(
         path.join(cwd, 'remix.json'),
-        JSON.stringify({ db: { adapter: { type: 'module', module: './app/database.ts' } } }),
+        JSON.stringify({ db: { adapter: { type: 'mongo', uri: 'mongodb://localhost' } } }),
         'utf8',
       )
 
       await assert.rejects(
         () => loadRemixConfig(cwd, undefined),
-        /Expected one of: sqlite, postgres, mysql at db\.adapter\.type/,
+        /Expected one of: sqlite, postgres, mysql, module at db\.adapter\.type/,
+      )
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('parses a module database configuration', async () => {
+    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-db-module-'))
+
+    try {
+      await fs.writeFile(
+        path.join(cwd, 'remix.json'),
+        JSON.stringify({
+          db: {
+            adapter: {
+              type: 'module',
+              module: './app/database.ts',
+              export: 'createDatabase',
+              connection: { env: 'DATABASE_URL', default: 'libsql://localhost' },
+              options: { authToken: { env: 'DATABASE_AUTH_TOKEN' } },
+            },
+          },
+        }),
+        'utf8',
+      )
+
+      let config = await loadRemixConfig(cwd, undefined)
+      assert.deepEqual(config.db?.adapter, {
+        type: 'module',
+        module: './app/database.ts',
+        export: 'createDatabase',
+        connection: { env: 'DATABASE_URL', default: 'libsql://localhost' },
+        options: { authToken: { env: 'DATABASE_AUTH_TOKEN' } },
+      })
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a module database configuration without a module', async () => {
+    let cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'remix-config-db-module-invalid-'))
+
+    try {
+      await fs.writeFile(
+        path.join(cwd, 'remix.json'),
+        JSON.stringify({ db: { adapter: { type: 'module' } } }),
+        'utf8',
+      )
+
+      await assert.rejects(
+        () => loadRemixConfig(cwd, undefined),
+        /Expected a string at db\.adapter\.module/,
       )
     } finally {
       await fs.rm(cwd, { recursive: true, force: true })
@@ -360,18 +481,13 @@ describe('loadRemixConfig', () => {
     }
   })
 
-  it('publishes the same schema with the CLI package and Remix website', async () => {
-    let packageSchema = await fs.readFile(
-      path.join(ROOT_DIR, 'packages', 'cli', 'schema', 'remix.json'),
-      'utf8',
-    )
-    let websiteSchema = await fs.readFile(
-      path.join(ROOT_DIR, 'docs', 'guides', 'public', 'schemas', 'remix.json'),
-      'utf8',
+  it('declares its JSON Schema dialect without an unpublished identifier', async () => {
+    let schema = JSON.parse(
+      await fs.readFile(path.join(ROOT_DIR, 'packages', 'cli', 'schema', 'remix.json'), 'utf8'),
     )
 
-    assert.equal(packageSchema, websiteSchema)
-    assert.equal(JSON.parse(packageSchema).$id, 'https://remix.run/schemas/remix.json')
+    assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema')
+    assert.equal('$id' in schema, false)
   })
 })
 

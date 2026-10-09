@@ -1,5 +1,5 @@
 import { createController } from 'remix/router'
-import { clientEntry } from 'remix/ui'
+import { clientEntry } from 'remix/component'
 
 import type { DocsContext, Versions } from '../../data/docs.ts'
 import { loadDemoComponent, renderDemoSource } from '../../data/demos.tsx'
@@ -30,7 +30,7 @@ export function createApiController(options: ApiControllerOptions) {
 
         if (docFile?.kind === 'demo') {
           let ExampleComponent = clientEntry(
-            `${docFile.assetHref}#default`,
+            `${docFile.importHref}#default`,
             await loadDemoComponent(docFile),
           )
           let sourceHtml = await renderDemoSource(docFile.source)

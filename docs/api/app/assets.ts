@@ -20,20 +20,18 @@ export function createAssetServer(version?: string): DocsAssetServer {
       'docs/api/app/**/public/**',
       'docs/shared/**/public/**',
     ],
-    allowPackages: ['remix'],
+    allowPackages: ['@remix-run/ui', 'remix'],
     denyFiles: ['**/*.test.*'],
-    fileMap: {
-      '/demos/*path': 'docs/api/build/demos/*path',
-      '/pkg/:pkg/src/*path': 'packages/:pkg/src/*path',
-      '/pkg/:pkg/deps/*path': 'packages/:pkg/node_modules/*path',
-      '/app/*path': 'docs/api/app/*path',
-      '/docs-shared/*path': 'docs/shared/*path',
+    mounts: {
+      app: 'docs/api/app',
+      demos: 'docs/api/build/demos',
+      'docs-shared': 'docs/shared',
+      npm: 'node_modules',
+      packages: 'packages',
     },
     sourceMaps: isDevelopment ? 'external' : undefined,
     minify: isProduction,
-    fingerprint: isProduction
-      ? { buildId: process.env.GITHUB_SHA || String(Date.now()) }
-      : undefined,
+    fingerprint: isProduction,
     watch: false,
     scripts: {
       define: {
